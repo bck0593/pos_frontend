@@ -5,49 +5,29 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
-env:
-  AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
-  # ↓ CRA は build, Vite は dist。必要に応じて dist に変更してください
-  FRONT_BUILD_DIR: build
-
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-
+    env:
+      AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
+      NEXT_TELEMETRY_DISABLED: 1
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Use Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
-      - name: Install deps
+      # （任意）ローカルでビルドしてLintエラー検出したい場合。Lintで失敗させたくないなら --no-lint を付ける
+      - name: Install deps & build
         run: |
-          npm ci || npm install
+          npm ci
+          npm run build --no-lint
 
-      - name: Build
-        run: |
-          if [ -f package.json ]; then
-            # Vite なら: npm run build で dist ができる想定
-            # CRA なら: npm run build で build ができる想定
-            npm run build
-          else
-            echo "package.json が見つかりません"; exit 1
-          fi
-
-      - name: Show build dir
-        run: |
-          echo "Build dir: $FRONT_BUILD_DIR"
-          ls -la $FRONT_BUILD_DIR || true
-
-      - name: Zip build output
-        run: |
-          cd $FRONT_BUILD_DIR
-          zip -r ../frontend.zip .
-          cd -
+      # 成果物フォルダに cd しない！リポ全体をZip化してOryxに任せる
+      - name: Zip repository
+        run: zip -r frontend.zip .
 
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
