@@ -5,29 +5,53 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+env:
+  AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
+  # ↓ CRA は build, Vite は dist。必要に応じて dist に変更してください
+  FRONT_BUILD_DIR: build
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    env:
-      AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Use Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: '20'
+          cache: 'npm'
 
-      - name: Install & Build
+      - name: Install deps
         run: |
-          npm ci
-          npm run build
+          npm ci || npm install
+
+      - name: Build
+        run: |
+          if [ -f package.json ]; then
+            # Vite なら: npm run build で dist ができる想定
+            # CRA なら: npm run build で build ができる想定
+            npm run build
+          else
+            echo "package.json が見つかりません"; exit 1
+          fi
+
+      - name: Show build dir
+        run: |
+          echo "Build dir: $FRONT_BUILD_DIR"
+          ls -la $FRONT_BUILD_DIR || true
+
+      - name: Zip build output
+        run: |
+          cd $FRONT_BUILD_DIR
+          zip -r ../frontend.zip .
+          cd -
 
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: .
+          package: frontend.zip
