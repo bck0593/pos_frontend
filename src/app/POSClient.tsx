@@ -8,8 +8,8 @@ import {
   health,
   fetchProductByCode,
   postPurchase,
-  ProductOut,
-  PurchaseItem,
+  type ProductOut,
+  type PurchaseItem,
 } from '@/lib/api';
 
 type Line = ProductOut & { quantity: number };
@@ -128,6 +128,7 @@ export default function POSClient() {
     }
   }
 
+  // code が変わったらフォーカス＆選択（スキャン直後の視認性のため）
   useEffect(() => {
     if (!codeInputRef.current) return;
     codeInputRef.current.focus();

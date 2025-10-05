@@ -1,13 +1,14 @@
 ﻿'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { BrowserMultiFormatReader, type IScannerControls } from '@zxing/browser';
+import { useEffect, useRef, useState } from 'react';
+import {
+  BrowserMultiFormatReader,
+  type IScannerControls,
+} from '@zxing/browser';
 import {
   BarcodeFormat,
   DecodeHintType,
   NotFoundException,
-  type Result,
-  type Exception,
 } from '@zxing/library';
 
 type Props = {
@@ -18,28 +19,16 @@ type Props = {
 
 type ScannerStatus = 'initializing' | 'scanning' | 'detected' | 'error';
 
-const ROI_WIDTH_RATIO = 0.7;
-const ROI_HEIGHT_RATIO = 0.4;
 const DEBUG = Boolean(process.env.NEXT_PUBLIC_DEBUG_SCAN);
 
-function debugLog(...args: unknown[]) {
-  if (DEBUG) console.log(...args);
-}
-
+/** EAN-13 チェックデジット検証 */
 function isValidEAN13(code: string): boolean {
   if (!/^\d{13}$/.test(code)) return false;
-  const digits = code.split('').map(Number);
-  const checkDigit = digits.pop()!;
-  const sum = digits.reduce((acc, d, i) => acc + d * (i % 2 === 0 ? 1 : 3), 0);
-  return (10 - (sum % 10)) % 10 === checkDigit;
+  const ds = code.split('').map(Number);
+  const check = ds.pop()!;
+  const sum = ds.reduce((acc, d, i) => acc + d * (i % 2 === 0 ? 1 : 3), 0);
+  return (10 - (sum % 10)) % 10 === check;
 }
-
-/** decodeFromVideoDevice のコールバック型（ライブラリ未エクスポートのため自前定義） */
-type DecodeCallback = (
-  result: Result | undefined,
-  err: Exception | undefined,
-  controls: IScannerControls
-) => void;
 
 export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -49,16 +38,6 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
 
   const [status, setStatus] = useState<ScannerStatus>('initializing');
   const [error, setError] = useState('');
-
-  const getScanRegion = useMemo(() => {
-    return (vw: number, vh: number) => {
-      const width = Math.floor(vw * ROI_WIDTH_RATIO);
-      const height = Math.floor(vh * ROI_HEIGHT_RATIO);
-      const x = Math.floor((vw - width) / 2);
-      const y = Math.floor((vh - height) / 2);
-      return { x, y, width, height };
-    };
-  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -70,14 +49,16 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         setStatus('initializing');
         setError('');
 
-        const stream = await navigator.mediaDevices.getUserMedia({
+        // カメラ起動
+        const constraints: MediaStreamConstraints = {
           video: {
             facingMode: { ideal: 'environment' },
             width: { ideal: 1280 },
             height: { ideal: 720 },
           },
           audio: false,
-        });
+        };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
         streamRef.current = stream;
 
         const video = videoRef.current;
@@ -88,6 +69,7 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         video.muted = true;
         await video.play();
 
+        // ZXing リーダ（フォーマットと TRY_HARDER 指定）
         const hints = new Map<DecodeHintType, unknown>();
         hints.set(DecodeHintType.POSSIBLE_FORMATS, [
           BarcodeFormat.EAN_13,
@@ -101,53 +83,38 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
 
         setStatus('scanning');
 
-        const callback: DecodeCallback = (result, err, controls) => {
-          if (stopped) return;
+        // 重要：型のあるコールバックだけ（frame/scanRegion 最適化は使わない）
+        controlsRef.current = await reader.decodeFromVideoDevice(
+          undefined,
+          video,
+          (result, err, controls) => {
+            if (stopped) return;
 
-          // ROI 更新（未対応環境でも安全に握りつぶし）
-          try {
-            const vw = video.videoWidth || 0;
-            const vh = video.videoHeight || 0;
-            if (vw && vh && typeof controls.setScanRegion === 'function') {
-              const region = getScanRegion(vw, vh);
-              controls.setScanRegion(region);
-              if (DEBUG && (performance.now() % 1000) < 30) {
-                debugLog('[scan] tick', { vw, vh, region });
+            if (result) {
+              const raw = result.getText();
+              const normalized = raw.replace(/\D/g, '');
+              if (DEBUG) console.log('[ZXing] raw:', raw, 'normalized:', normalized);
+              if (isValidEAN13(normalized)) {
+                setStatus('detected');
+                stopped = true;
+                try { controls?.stop(); } catch {}
+                try { readerRef.current?.reset?.(); } catch {}
+                try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
+                onDetected(normalized);
+                onClose();
               }
+              return;
             }
-          } catch {
-            /* noop */
-          }
 
-          if (result) {
-            const raw = String(result.getText?.() ?? '');
-            const normalized = raw.replace(/\D/g, '');
-            debugLog('✅ detected:', raw, '->', normalized);
-            if (isValidEAN13(normalized)) {
-              setStatus('detected');
-              onDetected(normalized);
-              onClose();
-              stopped = true;
-              try {
-                controls.stop();
-              } catch {}
-              try {
-                streamRef.current?.getTracks().forEach((t) => t.stop());
-              } catch {}
+            if (err && !(err instanceof NotFoundException)) {
+              if (DEBUG) console.warn('ZXing error:', err);
+              setStatus('error');
+              setError((err as Error).message ?? 'スキャンに失敗しました');
             }
-            return;
           }
-
-          if (err && !(err instanceof NotFoundException)) {
-            debugLog('ZXing error:', err);
-            setStatus('error');
-            setError((err as { message?: string }).message ?? 'スキャンに失敗しました');
-          }
-        };
-
-        controlsRef.current = await reader.decodeFromVideoDevice(undefined, video, callback);
+        );
       } catch (e) {
-        debugLog('Camera start failed:', e);
+        if (DEBUG) console.warn('Camera start failed:', e);
         setStatus('error');
         setError(e instanceof Error ? e.message : 'カメラを起動できませんでした');
       }
@@ -155,31 +122,22 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
 
     return () => {
       stopped = true;
-      try {
-        controlsRef.current?.stop();
-      } catch {}
-      try {
-        readerRef.current?.reset();
-      } catch {}
-      try {
-        streamRef.current?.getTracks().forEach((t) => t.stop());
-      } catch {}
+      try { controlsRef.current?.stop(); } catch {}
+      try { readerRef.current?.reset?.(); } catch {}
+      try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
       controlsRef.current = null;
       readerRef.current = null;
       streamRef.current = null;
     };
-  }, [open, onClose, onDetected, getScanRegion]);
+  }, [open, onClose, onDetected]);
 
   if (!open) return null;
 
   const statusLabel =
-    status === 'initializing'
-      ? 'カメラを準備しています…'
-      : status === 'detected'
-      ? '検出しました'
-      : status === 'error'
-      ? error || 'スキャンに失敗しました'
-      : 'スキャン中…';
+    status === 'initializing' ? 'カメラを準備しています…' :
+    status === 'scanning'      ? 'スキャン中…' :
+    status === 'detected'      ? '検出しました' :
+    error || 'スキャンに失敗しました';
 
   return (
     <div className="fixed inset-0 z-50">
@@ -193,7 +151,14 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         </div>
 
         <div className="relative overflow-hidden rounded-2xl border border-gray-200 bg-black">
-          <video ref={videoRef} className="h-[280px] w-full object-cover" playsInline muted autoPlay />
+          <video
+            ref={videoRef}
+            className="h-[280px] w-full object-cover"
+            playsInline
+            muted
+            autoPlay
+          />
+          {/* ガイド枠（視覚的な目安） */}
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <div
               className="rounded-2xl border-4 border-red-500/80 bg-red-500/5"
@@ -205,7 +170,7 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         <div className="mt-3 rounded-2xl bg-amber-50 p-3 text-xs text-amber-800">
           <p className="font-semibold">📷 スキャンのコツ</p>
           <ul className="mt-1 list-disc pl-5">
-            <li>バーコードを赤い枠に合わせる（横向きで中央に）</li>
+            <li>バーコードを赤い枠に合わせる（横向き水平）</li>
             <li>15〜25cm の距離を保つ</li>
             <li>明るい場所で手ブレを抑える</li>
           </ul>
