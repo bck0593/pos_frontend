@@ -1,11 +1,7 @@
 ﻿'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  BrowserMultiFormatReader,
-  type IScannerControls,
-  type DecodeContinuouslyCallback,
-} from '@zxing/browser';
+import { BrowserMultiFormatReader, type IScannerControls } from '@zxing/browser';
 import {
   BarcodeFormat,
   DecodeHintType,
@@ -38,6 +34,13 @@ function isValidEAN13(code: string): boolean {
   return (10 - (sum % 10)) % 10 === checkDigit;
 }
 
+/** decodeFromVideoDevice のコールバック型（ライブラリ未エクスポートのため自前定義） */
+type DecodeCallback = (
+  result: Result | undefined,
+  err: Exception | undefined,
+  controls: IScannerControls
+) => void;
+
 export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const readerRef = useRef<BrowserMultiFormatReader | null>(null);
@@ -47,7 +50,6 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
   const [status, setStatus] = useState<ScannerStatus>('initializing');
   const [error, setError] = useState('');
 
-  // video 実寸から ROI を算出
   const getScanRegion = useMemo(() => {
     return (vw: number, vh: number) => {
       const width = Math.floor(vw * ROI_WIDTH_RATIO);
@@ -86,7 +88,6 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         video.muted = true;
         await video.play();
 
-        // ZXing ヒント
         const hints = new Map<DecodeHintType, unknown>();
         hints.set(DecodeHintType.POSSIBLE_FORMATS, [
           BarcodeFormat.EAN_13,
@@ -100,16 +101,10 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
 
         setStatus('scanning');
 
-        // 型付きコールバック（no-any）
-        const callback: DecodeContinuouslyCallback = (
-          result: Result | undefined,
-          err: Exception | undefined,
-          controls: IScannerControls,
-          _frame?: HTMLCanvasElement | HTMLVideoElement,
-        ) => {
+        const callback: DecodeCallback = (result, err, controls) => {
           if (stopped) return;
 
-          // 毎フレーム ROI 更新（対応ブラウザでは setScanRegion が効く）
+          // ROI 更新（未対応環境でも安全に握りつぶし）
           try {
             const vw = video.videoWidth || 0;
             const vh = video.videoHeight || 0;
@@ -121,7 +116,7 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
               }
             }
           } catch {
-            // ROI 設定に失敗しても続行
+            /* noop */
           }
 
           if (result) {
@@ -150,12 +145,7 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
           }
         };
 
-        // 既定カメラからデコードを開始
-        controlsRef.current = await reader.decodeFromVideoDevice(
-          undefined,
-          video,
-          callback,
-        );
+        controlsRef.current = await reader.decodeFromVideoDevice(undefined, video, callback);
       } catch (e) {
         debugLog('Camera start failed:', e);
         setStatus('error');
