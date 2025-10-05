@@ -23,8 +23,7 @@ function isValidEAN13(code: string): boolean {
 }
 
 export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
-  if (!open) return null; // 開いてない時は何も描画しない（余計なマウントを避ける）
-
+  // ✅ フックは常に先頭で宣言（条件分岐の外）
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -34,6 +33,11 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
 
   useEffect(() => {
     let stopped = false;
+
+    // open=false のときは何もしない（フック自体は呼ばれているので OK）
+    if (!open) {
+      return () => { /* nothing */ };
+    }
 
     (async () => {
       try {
@@ -48,6 +52,10 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
           },
           audio: false,
         });
+        if (stopped) {
+          stream.getTracks().forEach(t => t.stop());
+          return;
+        }
         streamRef.current = stream;
 
         const video = videoRef.current;
@@ -67,10 +75,9 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         hints.set(DecodeHintType.TRY_HARDER, true);
 
         const reader = new BrowserMultiFormatReader(hints);
-
         setStatus('scanning');
 
-        // 型定義は (result, err, controls) の3引数
+        // 型は (result, err, controls) の3引数
         const controls = await reader.decodeFromVideoDevice(
           undefined,
           video,
@@ -92,8 +99,8 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
               return;
             }
 
+            // NotFound は「見つからなかっただけ」なので無視。他のエラーのみ表示
             if (err && !(err instanceof NotFoundException)) {
-              // 認識失敗(NotFound)は通常ループの一部なので握りつぶし、それ以外は表示
               if (DEBUG) console.warn('[ZXing] error:', err);
               setStatus('error');
               setError((err as Error).message ?? 'スキャンに失敗しました');
@@ -117,6 +124,9 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
       streamRef.current = null;
     };
   }, [open, onClose, onDetected]);
+
+  // ここで return null は OK（フック宣言はすでに実行済み）
+  if (!open) return null;
 
   const statusLabel =
     status === 'initializing' ? 'カメラを準備しています…' :
@@ -143,7 +153,6 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
             muted
             autoPlay
           />
-          {/* ガイド枠（視覚的目安） */}
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <div
               className="rounded-2xl border-4 border-red-500/80 bg-red-500/5"
