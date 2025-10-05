@@ -1,8 +1,18 @@
 ﻿'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { BrowserMultiFormatReader, type IScannerControls } from '@zxing/browser';
-import { BarcodeFormat, DecodeHintType, NotFoundException } from '@zxing/library';
+import {
+  BrowserMultiFormatReader,
+  type IScannerControls,
+  type DecodeContinuouslyCallback,
+} from '@zxing/browser';
+import {
+  BarcodeFormat,
+  DecodeHintType,
+  NotFoundException,
+  type Result,
+  type Exception,
+} from '@zxing/library';
 
 type Props = {
   open: boolean;
@@ -37,7 +47,7 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
   const [status, setStatus] = useState<ScannerStatus>('initializing');
   const [error, setError] = useState('');
 
-  // ROI の計算関数（video の実寸から算出）
+  // video 実寸から ROI を算出
   const getScanRegion = useMemo(() => {
     return (vw: number, vh: number) => {
       const width = Math.floor(vw * ROI_WIDTH_RATIO);
@@ -76,7 +86,7 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         video.muted = true;
         await video.play();
 
-        // ヒント（対応フォーマット、TRY_HARDER など）
+        // ZXing ヒント
         const hints = new Map<DecodeHintType, unknown>();
         hints.set(DecodeHintType.POSSIBLE_FORMATS, [
           BarcodeFormat.EAN_13,
@@ -90,15 +100,20 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
 
         setStatus('scanning');
 
-        // 型差分に影響されないように any でラップ
-        const callback: any = (result: any, err: any, controls: IScannerControls) => {
+        // 型付きコールバック（no-any）
+        const callback: DecodeContinuouslyCallback = (
+          result: Result | undefined,
+          err: Exception | undefined,
+          controls: IScannerControls,
+          _frame?: HTMLCanvasElement | HTMLVideoElement,
+        ) => {
           if (stopped) return;
 
-          // 毎フレーム ROI を更新（video 実寸から計算）
+          // 毎フレーム ROI 更新（対応ブラウザでは setScanRegion が効く）
           try {
             const vw = video.videoWidth || 0;
             const vh = video.videoHeight || 0;
-            if (vw && vh && controls?.setScanRegion) {
+            if (vw && vh && typeof controls.setScanRegion === 'function') {
               const region = getScanRegion(vw, vh);
               controls.setScanRegion(region);
               if (DEBUG && (performance.now() % 1000) < 30) {
@@ -106,11 +121,11 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
               }
             }
           } catch {
-            /* ROI 設定に失敗しても続行 */
+            // ROI 設定に失敗しても続行
           }
 
           if (result) {
-            const raw = String(result.getText?.() ?? result.text ?? '');
+            const raw = String(result.getText?.() ?? '');
             const normalized = raw.replace(/\D/g, '');
             debugLog('✅ detected:', raw, '->', normalized);
             if (isValidEAN13(normalized)) {
@@ -118,8 +133,12 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
               onDetected(normalized);
               onClose();
               stopped = true;
-              try { controls?.stop?.(); } catch {}
-              try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
+              try {
+                controls.stop();
+              } catch {}
+              try {
+                streamRef.current?.getTracks().forEach((t) => t.stop());
+              } catch {}
             }
             return;
           }
@@ -127,15 +146,15 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
           if (err && !(err instanceof NotFoundException)) {
             debugLog('ZXing error:', err);
             setStatus('error');
-            setError(err?.message ?? 'スキャンに失敗しました');
+            setError((err as { message?: string }).message ?? 'スキャンに失敗しました');
           }
         };
 
-        // ここも型差分を回避
-        controlsRef.current = await (reader.decodeFromVideoDevice as any)(
-          undefined, // 既定カメラ
+        // 既定カメラからデコードを開始
+        controlsRef.current = await reader.decodeFromVideoDevice(
+          undefined,
           video,
-          callback
+          callback,
         );
       } catch (e) {
         debugLog('Camera start failed:', e);
@@ -146,9 +165,15 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
 
     return () => {
       stopped = true;
-      try { controlsRef.current?.stop?.(); } catch {}
-      try { (readerRef.current as any)?.reset?.(); } catch {}
-      try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
+      try {
+        controlsRef.current?.stop();
+      } catch {}
+      try {
+        readerRef.current?.reset();
+      } catch {}
+      try {
+        streamRef.current?.getTracks().forEach((t) => t.stop());
+      } catch {}
       controlsRef.current = null;
       readerRef.current = null;
       streamRef.current = null;
