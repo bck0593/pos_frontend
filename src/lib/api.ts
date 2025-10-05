@@ -1,47 +1,61 @@
-// src/lib/api.ts
-const API_BASE =
-  process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://127.0.0.1:8000";
+﻿const BASE = process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, '') ?? '';
 
-export type Product = { code: string; name: string; unit_price: number };
-export type PurchaseItem = { product_code: string; quantity: number };
-export type PurchaseResponse = { success: boolean; transaction_id: number; total_amount: number };
+export type ProductOut = {
+  code: string;
+  name: string;
+  price: number;
+};
 
-export async function getProduct(code: string): Promise<Product | null> {
-  const res = await fetch(`${API_BASE}/products?code=${encodeURIComponent(code)}`, {
-    credentials: "include",
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`GET /products failed: ${res.status}`);
-  return res.json(); // 見つからなければ null
-}
+export type PurchaseItem = {
+  product_code: string;
+  quantity: number;
+};
 
-export async function purchase(items: PurchaseItem[], extra?: {
-  emp_cd?: string; store_cd?: string; pos_no?: string;
-}): Promise<PurchaseResponse> {
-  const body = {
-    emp_cd: extra?.emp_cd ?? "1234567890",
-    store_cd: extra?.store_cd ?? "30",
-    pos_no: extra?.pos_no ?? "90",
-    items,
-  };
+export type PurchaseRequest = {
+  emp_cd?: string;     // PDF準拠: 10桁まで
+  store_cd?: string;   // PDF準拠: 5桁
+  pos_no?: string;     // PDF準拠: 3桁
+  items: PurchaseItem[];
+};
 
-  const res = await fetch(`${API_BASE}/purchase`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-    body: JSON.stringify(body),
-  });
+export type PurchaseResponse = {
+  success: boolean;
+  transaction_id: number;
+  total_amount: number;        // 税込
+  total_amount_ex_tax?: number;// 税抜（バックエンド対応済みなら）
+  tax_cd?: string;             // 税区分（例 '10'）
+};
 
-  if (!res.ok) {
-    let detail = res.statusText;
-    try { const j = await res.json(); detail = j.detail ?? detail; } catch {}
-    throw new Error(`POST /purchase failed: ${detail}`);
+export async function health(): Promise<'ok'|'ng'> {
+  try {
+    const r = await fetch(`${BASE}/health`, { cache: 'no-store' });
+    if (!r.ok) return 'ng';
+    const j = await r.json();
+    return j?.status === 'ok' ? 'ok' : 'ng';
+  } catch {
+    return 'ng';
   }
-  return res.json();
 }
 
-export async function health(): Promise<{status: string}> {
-  const res = await fetch(`${API_BASE}/health`, { credentials: "include", cache: "no-store" });
-  if (!res.ok) throw new Error(`GET /health failed: ${res.status}`);
-  return res.json();
+export async function fetchProductByCode(code: string): Promise<ProductOut | null> {
+  const params = new URLSearchParams({ code });
+  const url = `${BASE}/products?${params.toString()}`;
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) return null;
+  const json = await response.json();
+  if (json && typeof json === 'object' && 'product' in json) {
+    const envelope = json as { product: ProductOut | null };
+    return envelope.product ?? null;
+  }
+  return (json as ProductOut | null) ?? null;
+}
+
+export async function postPurchase(req: PurchaseRequest): Promise<PurchaseResponse> {
+  const r = await fetch(`${BASE}/purchase`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
 }
