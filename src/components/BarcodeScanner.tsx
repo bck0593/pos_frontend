@@ -1,15 +1,8 @@
 ﻿'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import {
-  BrowserMultiFormatReader,
-  type IScannerControls,
-} from '@zxing/browser';
-import {
-  BarcodeFormat,
-  DecodeHintType,
-  NotFoundException,
-} from '@zxing/library';
+import { BrowserMultiFormatReader, type IScannerControls } from '@zxing/browser';
+import { BarcodeFormat, DecodeHintType, NotFoundException } from '@zxing/library';
 
 type Props = {
   open: boolean;
@@ -21,18 +14,18 @@ type ScannerStatus = 'initializing' | 'scanning' | 'detected' | 'error';
 
 const DEBUG = Boolean(process.env.NEXT_PUBLIC_DEBUG_SCAN);
 
-/** EAN-13 チェックデジット検証 */
 function isValidEAN13(code: string): boolean {
   if (!/^\d{13}$/.test(code)) return false;
-  const ds = code.split('').map(Number);
-  const check = ds.pop()!;
-  const sum = ds.reduce((acc, d, i) => acc + d * (i % 2 === 0 ? 1 : 3), 0);
-  return (10 - (sum % 10)) % 10 === check;
+  const digits = code.split('').map(Number);
+  const checkDigit = digits.pop()!;
+  const sum = digits.reduce((acc, d, i) => acc + d * (i % 2 === 0 ? 1 : 3), 0);
+  return (10 - (sum % 10)) % 10 === checkDigit;
 }
 
 export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
+  if (!open) return null; // 開いてない時は何も描画しない（余計なマウントを避ける）
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const readerRef = useRef<BrowserMultiFormatReader | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -40,8 +33,6 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (!open) return;
-
     let stopped = false;
 
     (async () => {
@@ -49,16 +40,14 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         setStatus('initializing');
         setError('');
 
-        // カメラ起動
-        const constraints: MediaStreamConstraints = {
+        const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: 'environment' },
             width: { ideal: 1280 },
             height: { ideal: 720 },
           },
           audio: false,
-        };
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        });
         streamRef.current = stream;
 
         const video = videoRef.current;
@@ -69,7 +58,6 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         video.muted = true;
         await video.play();
 
-        // ZXing リーダ（フォーマットと TRY_HARDER 指定）
         const hints = new Map<DecodeHintType, unknown>();
         hints.set(DecodeHintType.POSSIBLE_FORMATS, [
           BarcodeFormat.EAN_13,
@@ -79,12 +67,11 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         hints.set(DecodeHintType.TRY_HARDER, true);
 
         const reader = new BrowserMultiFormatReader(hints);
-        readerRef.current = reader;
 
         setStatus('scanning');
 
-        // 重要：型のあるコールバックだけ（frame/scanRegion 最適化は使わない）
-        controlsRef.current = await reader.decodeFromVideoDevice(
+        // 型定義は (result, err, controls) の3引数
+        const controls = await reader.decodeFromVideoDevice(
           undefined,
           video,
           (result, err, controls) => {
@@ -98,7 +85,6 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
                 setStatus('detected');
                 stopped = true;
                 try { controls?.stop(); } catch {}
-                try { readerRef.current?.reset?.(); } catch {}
                 try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
                 onDetected(normalized);
                 onClose();
@@ -107,13 +93,16 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
             }
 
             if (err && !(err instanceof NotFoundException)) {
-              if (DEBUG) console.warn('ZXing error:', err);
+              // 認識失敗(NotFound)は通常ループの一部なので握りつぶし、それ以外は表示
+              if (DEBUG) console.warn('[ZXing] error:', err);
               setStatus('error');
               setError((err as Error).message ?? 'スキャンに失敗しました');
             }
           }
         );
-      } catch (e) {
+
+        controlsRef.current = controls;
+      } catch (e: unknown) {
         if (DEBUG) console.warn('Camera start failed:', e);
         setStatus('error');
         setError(e instanceof Error ? e.message : 'カメラを起動できませんでした');
@@ -123,21 +112,17 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
     return () => {
       stopped = true;
       try { controlsRef.current?.stop(); } catch {}
-      try { readerRef.current?.reset?.(); } catch {}
       try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
       controlsRef.current = null;
-      readerRef.current = null;
       streamRef.current = null;
     };
   }, [open, onClose, onDetected]);
 
-  if (!open) return null;
-
   const statusLabel =
     status === 'initializing' ? 'カメラを準備しています…' :
-    status === 'scanning'      ? 'スキャン中…' :
-    status === 'detected'      ? '検出しました' :
-    error || 'スキャンに失敗しました';
+    status === 'detected'     ? '検出しました' :
+    status === 'error'        ? (error || 'スキャンに失敗しました') :
+                                'スキャン中…';
 
   return (
     <div className="fixed inset-0 z-50">
@@ -158,7 +143,7 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
             muted
             autoPlay
           />
-          {/* ガイド枠（視覚的な目安） */}
+          {/* ガイド枠（視覚的目安） */}
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <div
               className="rounded-2xl border-4 border-red-500/80 bg-red-500/5"
@@ -170,7 +155,7 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         <div className="mt-3 rounded-2xl bg-amber-50 p-3 text-xs text-amber-800">
           <p className="font-semibold">📷 スキャンのコツ</p>
           <ul className="mt-1 list-disc pl-5">
-            <li>バーコードを赤い枠に合わせる（横向き水平）</li>
+            <li>バーコードを赤い枠に合わせる（横にまっすぐ）</li>
             <li>15〜25cm の距離を保つ</li>
             <li>明るい場所で手ブレを抑える</li>
           </ul>
