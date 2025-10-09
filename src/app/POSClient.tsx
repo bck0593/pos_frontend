@@ -70,12 +70,11 @@ function calculateTotals(cart: CartLine[]) {
   return { taxOut, tax, taxIn };
 }
 
-interface POSBridgeWindow extends Window {
-  POSLv3_onScan?: (code: string) => void;
-}
-
+// ✅ Window のグローバル拡張は declare global で直接書く
 declare global {
-  interface Window extends POSBridgeWindow {}
+  interface Window {
+    POSLv3_onScan?: (code: string) => void;
+  }
 }
 
 function ScriptlessBridge({ onScan }: { onScan: (code: string) => void }) {
@@ -130,9 +129,7 @@ export default function POSClient() {
   }, []);
 
   useEffect(() => {
-    if (!isCameraOpen) {
-      return;
-    }
+    if (!isCameraOpen) return;
     const video = videoRef.current;
     const stream = cameraStreamRef.current;
     if (video && stream) {
@@ -324,9 +321,7 @@ export default function POSClient() {
   const handleDeleteLine = useCallback(
     (code: string) => {
       setCart((prev) => prev.filter((line) => line.code !== code));
-      if (selectedCode === code) {
-        resetEntryState();
-      }
+      if (selectedCode === code) resetEntryState();
       setCompletionMessage('行を削除しました。');
     },
     [resetEntryState, selectedCode],
@@ -344,7 +339,7 @@ export default function POSClient() {
       setCart([]);
       resetEntryState();
       setCheckoutOpen(false);
-    } catch (error) {
+    } catch {
       pushError('会計処理でエラーが発生しました。');
     } finally {
       setIsConfirming(false);
@@ -396,10 +391,7 @@ export default function POSClient() {
           </div>
         )}
 
-        <section
-          data-testid="scan-card"
-          className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-neutral-200"
-        >
+        <section data-testid="scan-card" className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-neutral-200">
           <button
             type="button"
             data-testid="btn-open-scanner"
@@ -468,10 +460,7 @@ export default function POSClient() {
           </div>
         </section>
 
-        <section
-          data-testid="cart"
-          className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-neutral-200"
-        >
+        <section data-testid="cart" className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-neutral-200">
           <div data-testid="cart-header" className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-neutral-800">カート</h2>
             <button
@@ -499,9 +488,7 @@ export default function POSClient() {
                     data-code={line.code}
                     aria-selected={isSelected}
                     className={`flex items-center gap-3 rounded-xl border p-3 transition ${
-                      isSelected
-                        ? 'border-blue-300 bg-blue-100'
-                        : 'border-neutral-200 bg-white hover:border-blue-200'
+                      isSelected ? 'border-blue-300 bg-blue-100' : 'border-neutral-200 bg-white hover:border-blue-200'
                     }`}
                     role="option"
                     tabIndex={0}
@@ -515,7 +502,9 @@ export default function POSClient() {
                   >
                     <div className="flex-1">
                       <p className="text-sm font-semibold text-neutral-800">{line.name}</p>
-                      <p className="mt-1 text-xs text-neutral-500">{formatCurrency(line.unitPrice)} / {line.quantity}個</p>
+                      <p className="mt-1 text-xs text-neutral-500">
+                        {formatCurrency(line.unitPrice)} / {line.quantity}個
+                      </p>
                     </div>
                     <span aria-hidden="true" className="text-neutral-400">
                       ↕︎
@@ -550,7 +539,9 @@ export default function POSClient() {
         <div className="rounded-3xl bg-white p-4 shadow-lg ring-1 ring-neutral-200">
           <div className="flex items-center justify-between text-xs text-neutral-500">
             <span>うち税額</span>
-            <span data-testid="total-tax" className="font-medium text-neutral-700">{formatCurrency(totals.tax)}</span>
+            <span data-testid="total-tax" className="font-medium text-neutral-700">
+              {formatCurrency(totals.tax)}
+            </span>
           </div>
           <div className="mt-1 flex items-center justify-between text-sm text-neutral-500">
             <span>合計（税込）</span>
@@ -571,10 +562,7 @@ export default function POSClient() {
       </div>
 
       {isCameraOpen && (
-        <div
-          data-testid="modal-scanner"
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 px-4"
-        >
+        <div data-testid="modal-scanner" className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 px-4">
           <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-xl ring-1 ring-neutral-200">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold text-neutral-900">カメラで追加</h2>
@@ -587,14 +575,7 @@ export default function POSClient() {
             </div>
             <div className="mt-4 overflow-hidden rounded-3xl bg-neutral-200">
               <div className="relative aspect-[4/3] w-full">
-                <video
-                  ref={videoRef}
-                  data-testid="video"
-                  className="h-full w-full object-cover"
-                  autoPlay
-                  muted
-                  playsInline
-                />
+                <video ref={videoRef} data-testid="video" className="h-full w-full object-cover" autoPlay muted playsInline />
                 <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                   <div
                     data-testid="overlay-guide"
@@ -603,10 +584,7 @@ export default function POSClient() {
                 </div>
               </div>
             </div>
-            <div
-              data-testid="tips"
-              className="mt-5 rounded-2xl bg-neutral-50 p-4 text-xs text-neutral-600 ring-1 ring-neutral-200"
-            >
+            <div data-testid="tips" className="mt-5 rounded-2xl bg-neutral-50 p-4 text-xs text-neutral-600 ring-1 ring-neutral-200">
               <h3 className="text-sm font-semibold text-neutral-800">スキャンのコツ</h3>
               <ul className="mt-2 space-y-1">
                 <li>・バーコードを赤い枠に合わせる（端に寄せすぎない）</li>
@@ -647,9 +625,7 @@ export default function POSClient() {
                 </div>
                 <div className="flex justify-between">
                   <span>小計（税込）</span>
-                  <span>{formatCurrency(
-                    Math.round(scanCandidate.item.unitPrice * scanCandidate.quantity * (1 + TAX_RATE)),
-                  )}</span>
+                  <span>{formatCurrency(Math.round(scanCandidate.item.unitPrice * scanCandidate.quantity * (1 + TAX_RATE)))}</span>
                 </div>
               </div>
             </div>
@@ -677,17 +653,9 @@ export default function POSClient() {
 
       {isCheckoutOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
-          <div
-            data-testid="modal-checkout"
-            role="dialog"
-            aria-modal="true"
-            className="w-full max-w-md rounded-3xl bg-white p-6 shadow-xl ring-1 ring-neutral-200"
-          >
+          <div data-testid="modal-checkout" role="dialog" aria-modal="true" className="w-full max-w-md rounded-3xl bg-white p-6 shadow-xl ring-1 ring-neutral-200">
             <h2 className="text-base font-semibold text-neutral-900">会計内容の確認</h2>
-            <div
-              data-testid="modal-lines"
-              className="mt-4 max-h-64 space-y-3 overflow-y-auto pr-1"
-            >
+            <div data-testid="modal-lines" className="mt-4 max-h-64 space-y-3 overflow-y-auto pr-1">
               {cart.map((line) => (
                 <div key={`modal-${line.code}`} className="rounded-2xl bg-neutral-50 p-4 ring-1 ring-neutral-200">
                   <div className="flex items-start justify-between text-xs text-neutral-600">
