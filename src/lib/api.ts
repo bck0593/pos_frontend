@@ -1,101 +1,192 @@
-﻿// lib/api.ts
-const BASE =
-  process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, '') ??
-  process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, '') ??
-  '';
+﻿const API_BASE = (process.env.NEXT_PUBLIC_API_BASE ?? '').replace(/\/$/, '');
 
-if (!BASE) {
-  console.warn('⚠️ NEXT_PUBLIC_API_BASE または NEXT_PUBLIC_BACKEND_URL が設定されていません');
+const DEFAULT_HEADERS: HeadersInit = {
+  'Content-Type': 'application/json',
+};
+
+let accessToken: string | null = null;
+
+const ACCESS_TOKEN_HEADER = 'Authorization';
+const GENERIC_ERROR = 'サーバーでエラーが発生しました。時間をおいて再度お試しください。';
+
+type RequestOptions = {
+  auth?: boolean;
+  retry?: boolean;
+};
+
+export type TokenResponse = {
+  access_token: string;
+  token_type: 'bearer';
+  expires_in: number;
+};
+
+function buildUrl(path: string): string {
+  if (!API_BASE) {
+    return path;
+  }
+  return `${API_BASE}${path}`;
 }
 
-export type ProductOut = {
-  code: string;
-  name: string;
-  price: number;
-};
+function sanitizeError(): Error {
+  return new Error(GENERIC_ERROR);
+}
 
-export type PurchaseItem = {
-  product_code: string;
-  quantity: number;
-};
-
-export type PurchaseRequest = {
-  emp_cd?: string; // 従業員コード（最大10桁）
-  store_cd?: string; // 店舗コード（最大5桁）
-  pos_no?: string; // POS番号（最大3桁）
-  items: PurchaseItem[];
-};
-
-export type PurchaseResponse = {
-  success: boolean;
-  transaction_id: number;
-  total_amount: number; // 税込
-  total_amount_ex_tax?: number; // 税抜
-  tax_cd?: string; // 税区分（例: '10'）
-};
-
-/**
- * バックエンド疎通確認
- */
-export async function health(): Promise<'ok' | 'ng'> {
-  const url = `${BASE}/health`;
+async function refreshAccessToken(): Promise<boolean> {
   try {
-    console.log('🩺 Checking backend health:', url);
-    const res = await fetch(url, { cache: 'no-store' });
+    const res = await fetch(buildUrl('/auth/refresh'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: DEFAULT_HEADERS,
+    });
     if (!res.ok) {
-      console.error('❌ Health check failed:', res.status, res.statusText);
+      accessToken = null;
+      return false;
+    }
+    const data = (await res.json()) as TokenResponse;
+    accessToken = data.access_token;
+    return true;
+  } catch {
+    accessToken = null;
+    return false;
+  }
+}
+
+async function request<T>(path: string, init: RequestInit = {}, opts: RequestOptions = {}): Promise<T> {
+  const { auth = false, retry = true } = opts;
+
+  if (auth && !accessToken) {
+    const refreshed = await refreshAccessToken();
+    if (!refreshed) {
+      throw sanitizeError();
+    }
+  }
+
+  const headers = new Headers(init.headers ?? {});
+  if (!(init.body instanceof FormData) && !headers.has('Content-Type')) {
+    headers.set('Content-Type', DEFAULT_HEADERS['Content-Type']);
+  }
+  if (auth && accessToken) {
+    headers.set(ACCESS_TOKEN_HEADER, `Bearer ${accessToken}`);
+  }
+
+  const response = await fetch(buildUrl(path), {
+    ...init,
+    credentials: 'include',
+    headers,
+  });
+
+  if (response.status === 401 && auth && retry) {
+    const refreshed = await refreshAccessToken();
+    if (refreshed && accessToken) {
+      return request<T>(path, init, { auth: true, retry: false });
+    }
+    throw sanitizeError();
+  }
+
+  if (!response.ok) {
+    throw sanitizeError();
+  }
+
+  if (response.status === 204 || response.headers.get('Content-Length') === '0') {
+    return undefined as T;
+  }
+
+  return (await response.json()) as T;
+}
+
+export async function login(username: string, password: string): Promise<void> {
+  const res = await fetch(buildUrl('/auth/login'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: DEFAULT_HEADERS,
+    body: JSON.stringify({ username, password }),
+  });
+
+  if (!res.ok) {
+    throw sanitizeError();
+  }
+
+  const data = (await res.json()) as TokenResponse;
+  accessToken = data.access_token;
+}
+
+export async function logout(): Promise<void> {
+  accessToken = null;
+  await fetch(buildUrl('/auth/logout'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: DEFAULT_HEADERS,
+  });
+}
+
+export async function health(): Promise<'ok' | 'ng'> {
+  try {
+    const res = await fetch(buildUrl('/healthz'), { credentials: 'include' });
+    if (!res.ok) {
       return 'ng';
     }
     const json = await res.json();
     return json?.status === 'ok' ? 'ok' : 'ng';
-  } catch (err) {
-    console.error('⚠️ Health check error:', err);
+  } catch {
     return 'ng';
   }
 }
 
-/**
- * 商品コードで検索
- */
-export async function fetchProductByCode(code: string): Promise<ProductOut | null> {
-  const url = `${BASE}/products?code=${encodeURIComponent(code)}`;
+export type ItemMaster = {
+  code: string;
+  name: string;
+  unit_price: number;
+};
+
+export async function fetchItemByCode(code: string): Promise<ItemMaster | null> {
+  if (!code) return null;
   try {
-    console.log('🔎 Fetching product:', url);
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) {
-      console.error('❌ fetchProductByCode failed:', res.status, res.statusText);
-      return null;
-    }
-    const data = await res.json();
-    return data?.product ?? null;
-  } catch (err) {
-    console.error('⚠️ fetchProductByCode error:', err);
+    const data = await request<ItemMaster>(`/items/${encodeURIComponent(code)}`, { method: 'GET' }, { auth: true });
+    return data;
+  } catch {
     return null;
   }
 }
 
-/**
- * 購入リクエストを送信
- */
-export async function postPurchase(req: PurchaseRequest): Promise<PurchaseResponse> {
-  const url = `${BASE}/purchase`;
+export type SaleLine = {
+  code: string;
+  name: string;
+  unit_price: number;
+  qty: number;
+};
+
+export type SaleRequest = {
+  lines: SaleLine[];
+  tax_out: number;
+  tax: number;
+  tax_in: number;
+  device_id?: string | null;
+  cashier_id?: string | null;
+};
+
+export type SaleResponse = {
+  id: string;
+  tax_out: number;
+  tax: number;
+  tax_in: number;
+  created_at: string;
+};
+
+export async function submitSale(payload: SaleRequest): Promise<SaleResponse> {
   try {
-    console.log('🧾 Posting purchase:', url, req);
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req),
-    });
-
-    if (!res.ok) {
-      console.error('❌ postPurchase failed:', res.status, res.statusText);
-      throw new Error(`HTTP ${res.status} ${res.statusText}`);
-    }
-
-    const data = (await res.json()) as PurchaseResponse;
-    return data;
-  } catch (err) {
-    console.error('⚠️ postPurchase error:', err);
-    throw err instanceof Error ? err : new Error(String(err));
+    return await request<SaleResponse>(
+      '/sales',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      { auth: true },
+    );
+  } catch {
+    throw sanitizeError();
   }
+}
+
+export function useAccessToken(): string | null {
+  return accessToken;
 }
