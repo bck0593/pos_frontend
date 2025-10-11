@@ -16,7 +16,7 @@ type ScannerStatus = 'initializing' | 'scanning' | 'detected' | 'error';
 const DEBUG = Boolean(process.env.NEXT_PUBLIC_DEBUG_SCAN);
 const DETECTED_COOLDOWN_MS = 600;
 
-export default function BarcodeScanner({ open, onClose, onDetected }: Props): JSX.Element | null {
+export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
