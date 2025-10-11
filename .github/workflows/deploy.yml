@@ -1,8 +1,12 @@
+# .github/workflows/frontend.yml
 name: Deploy Frontend to Azure Web App
 
 on:
   push:
     branches: [ "main" ]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend.yml'
   workflow_dispatch:
 
 jobs:
@@ -11,6 +15,11 @@ jobs:
     env:
       AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
       NEXT_TELEMETRY_DISABLED: 1
+
+    defaults:
+      run:
+        working-directory: frontend
+
     steps:
       - uses: actions/checkout@v4
 
@@ -18,20 +27,30 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
 
-      # （任意）ローカルでビルドしてLintエラー検出したい場合。Lintで失敗させたくないなら --no-lint を付ける
-      - name: Install deps & build
+      - name: Install deps & build (Next standalone)
         run: |
           npm ci
           npm run build --no-lint
 
-      # 成果物フォルダに cd しない！リポ全体をZip化してOryxに任せる
-      - name: Zip repository
-        run: zip -r frontend.zip .
+      # Next.js standalone の配布物を out/ にまとめる
+      - name: Prepare artifact
+        run: |
+          rm -rf out && mkdir -p out/.next
+          # .next/standalone には server.js と node_modules 相当が入る
+          cp -r .next/standalone/* out/
+          # 静的ファイルを配置
+          cp -r .next/static out/.next/static
+          if [ -d public ]; then cp -r public out/public; fi
+          # package.json を同梱（念のため start スクリプトを定義）
+          node -e "let p=require('./package.json');p.scripts=p.scripts||{};p.scripts.start='node server.js';require('fs').writeFileSync('out/package.json',JSON.stringify(p,null,2))"
 
-      - name: Deploy to Azure Web App
+      - name: Deploy to Azure Web App (artifact only)
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: frontend.zip
+          package: frontend/out
+          startup-command: 'node server.js'
