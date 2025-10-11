@@ -1,6 +1,7 @@
 # .github/workflows/frontend.yml
 name: Deploy Frontend to Azure Web App
 
+
 on:
   push:
     branches: [ "main" ]
