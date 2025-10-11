@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState, type ReactElement } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { BrowserMultiFormatReader, IScannerControls } from '@zxing/browser';
 import {
   DecodeHintType,
@@ -16,17 +16,17 @@ type Props = {
   onDetected: (code: string) => void;
 };
 
-const DETECTED_COOLDOWN_MS = 700;
+const DETECTED_COOLDOWN_MS = 700; // 連続検出の過剰トリガー抑制
 
 function isValidEAN13(text: string) {
   if (!/^\d{13}$/.test(text)) return false;
   const digits = text.split('').map(Number);
   const check = digits.pop()!;
-  const sum = digits.reduce((acc, digit, index) => acc + digit * (index % 2 === 0 ? 1 : 3), 0);
+  const sum = digits.reduce((acc, digit, idx) => acc + digit * (idx % 2 === 0 ? 1 : 3), 0);
   return (10 - (sum % 10)) % 10 === check;
 }
 
-export default function BarcodeScanner({ open, onClose, onDetected }: Props): ReactElement | null {
+export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -37,11 +37,11 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props): Re
     if (!open) return;
     let cancelled = false;
 
-    // ヒント（EAN-13に絞る）
+    // ZXing のヒント設定（EAN-13 のみ）
     const hints = new Map();
     hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13]);
 
-    // v0.1x 以降は第2引数はオプションオブジェクト
+    // ★ ここが今回の修正点：第2引数は数値ではなくオプションオブジェクト
     const reader = new BrowserMultiFormatReader(hints, {
       delayBetweenScanAttempts: DETECTED_COOLDOWN_MS,
       delayBetweenScanSuccess: DETECTED_COOLDOWN_MS,
@@ -51,6 +51,7 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props): Re
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
         const videos = devices.filter((d) => d.kind === 'videoinput');
+        // ラベルに "back/rear/environment" を含むものを優先（iOS Safari は https + 許可後でないと label が出ないことあり）
         const back = videos.find((d) => /back|rear|environment/i.test(d.label));
         return back ?? videos[0] ?? null;
       } catch {
@@ -62,17 +63,13 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props): Re
       setErrorMsg(null);
       try {
         const back = await pickBackCamera();
+
+        // iOS Safari 向けに environment を理想指定、取れるなら deviceId を使う
         const constraints: MediaStreamConstraints = {
           video: back
-            ? {
-                deviceId: { exact: back.deviceId },
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
-                // iOS Safariでも環境カメラを優先
-                facingMode: { ideal: 'environment' as any },
-              }
+            ? { deviceId: { exact: back.deviceId } }
             : {
-                facingMode: { ideal: 'environment' as any },
+                facingMode: { ideal: 'environment' },
                 width: { ideal: 1280 },
                 height: { ideal: 720 },
               },
@@ -86,7 +83,8 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props): Re
         if (!video) return;
 
         video.srcObject = stream;
-        // iOSの自動再生対策: muted + playsInline + 明示play
+        // iOS Safari でインライン再生を有効化
+        video.setAttribute('playsinline', 'true');
         await video.play();
 
         controlsRef.current = await reader.decodeFromVideoDevice(undefined, video, (result, err) => {
@@ -108,31 +106,31 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props): Re
               err instanceof ChecksumException ||
               err instanceof FormatException)
           ) {
-            // 見つからない/チェックサム/書式エラーはスルーして継続
+            // 未検出・チェックサム不一致・形式不正は黙って再試行
             return;
           }
         });
       } catch (error: any) {
         if (error?.name === 'NotAllowedError') {
           setErrorMsg('カメラ使用が許可されていません。ブラウザの設定で許可してください。');
-        } else if (location.protocol !== 'https:') {
-          setErrorMsg('HTTPSでのアクセスが必要です。httpsで開いてください。');
+        } else if (window.isSecureContext === false) {
+          setErrorMsg('HTTPS でのアクセスが必要です。https でページを開いてください。');
         } else {
-          setErrorMsg('カメラを開始できませんでした。権限や他アプリの占有を確認してください。');
+          setErrorMsg('カメラを開始できませんでした。デバイスのカメラ権限や https を確認してください。');
         }
       }
     }
 
     start();
 
-    // タブ戻り時に再開
+    // タブが非表示になったら一時停止、復帰で再開
     const handleVisibility = () => {
       if (document.hidden) {
         controlsRef.current?.stop();
         controlsRef.current = null;
       } else if (!controlsRef.current && videoRef.current?.srcObject) {
         reader
-          .decodeFromVideoDevice(undefined, videoRef.current, (result, err) => {
+          .decodeFromVideoDevice(undefined, videoRef.current!, (result, err) => {
             if (cancelled) return;
 
             if (result) {
@@ -165,27 +163,24 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props): Re
     };
     document.addEventListener('visibilitychange', handleVisibility);
 
+    // クリーンアップ
     return () => {
       cancelled = true;
       document.removeEventListener('visibilitychange', handleVisibility);
-
       try {
         controlsRef.current?.stop();
       } catch {
         /* noop */
+      } finally {
+        controlsRef.current = null;
       }
-      controlsRef.current = null;
-
       const stream = streamRef.current;
       if (stream) {
         stream.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
-
-      const video = videoRef.current;
-      if (video) {
-        video.srcObject = null;
-      }
+      const v = videoRef.current;
+      if (v) v.srcObject = null;
     };
   }, [open, onDetected]);
 
@@ -198,6 +193,7 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props): Re
           ref={videoRef}
           className="w-full rounded-xl border-2 border-white/70"
           playsInline
+          // muted/autoPlay は video.play() 前提で、属性も付けておく（iOS 対策）
           muted
           autoPlay
         />
@@ -209,7 +205,7 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props): Re
           >
             閉じる
           </button>
-          {errorMsg && <p className="text-sm text-red-300">{errorMsg}</p>}
+          {errorMsg && <p className="ml-3 text-sm text-red-300">{errorMsg}</p>}
         </div>
       </div>
     </div>
