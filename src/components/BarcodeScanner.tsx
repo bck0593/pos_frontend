@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, type ReactElement } from 'react';
 import { BrowserMultiFormatReader, IScannerControls } from '@zxing/browser';
 import {
   DecodeHintType,
@@ -26,7 +26,7 @@ function isValidEAN13(text: string) {
   return (10 - (sum % 10)) % 10 === check;
 }
 
-export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
+export default function BarcodeScanner({ open, onClose, onDetected }: Props): ReactElement | null {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -37,11 +37,15 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
     if (!open) return;
     let cancelled = false;
 
-    // ← ここがポイント：hints は @zxing/library の DecodeHintType/BarcodeFormat を使う
-    const hints = new Map<DecodeHintType, unknown>();
+    // ヒント（EAN-13に絞る）
+    const hints = new Map();
     hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13]);
-    // BrowserMultiFormatReader の引数に hints（と任意のクールダウンms）
-    const reader = new BrowserMultiFormatReader(hints, DETECTED_COOLDOWN_MS);
+
+    // v0.1x 以降は第2引数はオプションオブジェクト
+    const reader = new BrowserMultiFormatReader(hints, {
+      delayBetweenScanAttempts: DETECTED_COOLDOWN_MS,
+      delayBetweenScanSuccess: DETECTED_COOLDOWN_MS,
+    });
 
     async function pickBackCamera(): Promise<MediaDeviceInfo | null> {
       try {
@@ -58,16 +62,20 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
       setErrorMsg(null);
       try {
         const back = await pickBackCamera();
-
         const constraints: MediaStreamConstraints = {
           video: back
             ? {
                 deviceId: { exact: back.deviceId },
                 width: { ideal: 1280 },
                 height: { ideal: 720 },
-                facingMode: 'environment' as const,
+                // iOS Safariでも環境カメラを優先
+                facingMode: { ideal: 'environment' as any },
               }
-            : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+            : {
+                facingMode: { ideal: 'environment' as any },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
           audio: false,
         };
 
@@ -77,8 +85,8 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         const video = videoRef.current;
         if (!video) return;
 
-        video.setAttribute('playsinline', 'true'); // iOS 対策
         video.srcObject = stream;
+        // iOSの自動再生対策: muted + playsInline + 明示play
         await video.play();
 
         controlsRef.current = await reader.decodeFromVideoDevice(undefined, video, (result, err) => {
@@ -95,25 +103,29 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
           }
 
           if (
-            err instanceof NotFoundException ||
-            err instanceof ChecksumException ||
-            err instanceof FormatException
+            err &&
+            (err instanceof NotFoundException ||
+              err instanceof ChecksumException ||
+              err instanceof FormatException)
           ) {
-            // これらは毎フレーム起こり得るので握りつぶす
+            // 見つからない/チェックサム/書式エラーはスルーして継続
             return;
           }
         });
-      } catch (error: unknown) {
-        if (error && typeof error === 'object' && 'name' in error && (error as any).name === 'NotAllowedError') {
+      } catch (error: any) {
+        if (error?.name === 'NotAllowedError') {
           setErrorMsg('カメラ使用が許可されていません。ブラウザの設定で許可してください。');
+        } else if (location.protocol !== 'https:') {
+          setErrorMsg('HTTPSでのアクセスが必要です。httpsで開いてください。');
         } else {
-          setErrorMsg('カメラを開始できませんでした。HTTPSやカメラ権限を確認してください。');
+          setErrorMsg('カメラを開始できませんでした。権限や他アプリの占有を確認してください。');
         }
       }
     }
 
     start();
 
+    // タブ戻り時に再開
     const handleVisibility = () => {
       if (document.hidden) {
         controlsRef.current?.stop();
@@ -134,21 +146,21 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
             }
 
             if (
-              err instanceof NotFoundException ||
-              err instanceof ChecksumException ||
-              err instanceof FormatException
+              err &&
+              (err instanceof NotFoundException ||
+                err instanceof ChecksumException ||
+                err instanceof FormatException)
             ) {
               return;
             }
           })
           .then((controls) => {
-            if (!cancelled) {
-              controlsRef.current = controls;
-            } else {
-              controls.stop();
-            }
+            if (!cancelled) controlsRef.current = controls;
+            else controls.stop();
           })
-          .catch(() => {});
+          .catch(() => {
+            /* noop */
+          });
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
@@ -156,13 +168,20 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
     return () => {
       cancelled = true;
       document.removeEventListener('visibilitychange', handleVisibility);
-      controlsRef.current?.stop();
+
+      try {
+        controlsRef.current?.stop();
+      } catch {
+        /* noop */
+      }
       controlsRef.current = null;
+
       const stream = streamRef.current;
       if (stream) {
         stream.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
+
       const video = videoRef.current;
       if (video) {
         video.srcObject = null;
@@ -183,12 +202,14 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
           autoPlay
         />
         <div className="mt-3 flex items-center justify-between">
-          <button className="rounded-lg bg-white px-4 py-2 text-black" onClick={onClose} aria-label="閉じる">
+          <button
+            className="rounded-lg bg-white px-4 py-2 text-black"
+            onClick={onClose}
+            aria-label="閉じる"
+          >
             閉じる
           </button>
-          {/* エラーメッセージ */}
-          {/* iOS の場合は「ホーム画面に追加」や「HTTPS必須」も有効な注意点 */}
-          {/* 任意で表示 */}
+          {errorMsg && <p className="text-sm text-red-300">{errorMsg}</p>}
         </div>
       </div>
     </div>
