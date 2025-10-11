@@ -1,8 +1,11 @@
-// next.config.ts
-import type { NextConfig } from "next";
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  // ← これがないと .next/standalone が出ません
+  output: 'standalone',
 
-const nextConfig: NextConfig = {
-  eslint: { ignoreDuringBuilds: true }, // ← これだけでOK（ビルド時にESLint無視）
+  // 必要なら他の設定もここに
+  // experimental: { ... },
+  // images: { ... },
 };
 
-export default nextConfig;
+module.exports = nextConfig;
