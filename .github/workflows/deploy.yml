@@ -36,40 +36,48 @@ jobs:
           ls -la .next || true
           ls -la .next/standalone || true
 
-      - name: Prepare artifact (out/)
+      - name: Prepare artifact
         run: |
           if [ ! -d ".next/standalone" ]; then
-            echo "::error ::.next/standalone not found. Set output:'standalone' in next.config.*"
+            echo "::error ::.next/standalone not found. Ensure next.config.* has: module.exports = { output: 'standalone' }"
             exit 1
           fi
           rm -rf out && mkdir -p out/.next
           cp -r .next/standalone/* out/
           cp -r .next/static out/.next/static
-          [ -d public ] && cp -r public out/public || true
-          # start スクリプトを同梱
+          if [ -d public ]; then cp -r public out/public; fi
           node -e "let p=require('./package.json');p.scripts=p.scripts||{};p.scripts.start='node server.js';require('fs').writeFileSync('out/package.json',JSON.stringify(p,null,2))"
-          # Windows App Service 用 iisnode 設定
-          cat > out/web.config <<'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<configuration>
-  <system.webServer>
-    <handlers>
-      <add name="iisnode" path="server.js" verb="*" modules="iisnode"/>
-    </handlers>
-    <rewrite>
-      <rules>
-        <rule name="NextJS" stopProcessing="true">
-          <match url=".*"/>
-          <action type="Rewrite" url="server.js"/>
-        </rule>
-      </rules>
-    </rewrite>
-  </system.webServer>
-</configuration>
-EOF
+
+          # --- Windows App Service 用の web.config を生成（iisnode で server.js を起動）---
+          cat > out/web.config << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <system.webServer>
+              <handlers>
+                <add name="iisnode" path="server.js" verb="*" modules="iisnode" />
+              </handlers>
+              <rewrite>
+                <rules>
+                  <!-- すべてのリクエストを Next の server.js に渡す -->
+                  <rule name="DynamicContent" stopProcessing="true">
+                    <match url=".*" />
+                    <action type="Rewrite" url="server.js" />
+                  </rule>
+                </rules>
+              </rewrite>
+              <!-- 静的ファイル優先（必要に応じて） -->
+              <staticContent>
+                <remove fileExtension=".json" />
+                <mimeMap fileExtension=".json" mimeType="application/json" />
+              </staticContent>
+            </system.webServer>
+          </configuration>
+          EOF
+
+          echo "=== out tree ==="
           ls -la out
-          test -f out/server.js || (echo '::error ::server.js missing' && exit 1)
-          test -f out/web.config || (echo '::error ::web.config missing' && exit 1)
+          test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
+          test -f out/web.config || (echo '::error ::web.config missing in out/' && exit 1)
 
       - name: Wait a bit (avoid SCM restart race)
         run: sleep 20
@@ -80,4 +88,4 @@ EOF
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           package: out
-          # Windows では startup-command を指定しない
+          # Windows + publish-profile では startup-command は使用不可。削除！
