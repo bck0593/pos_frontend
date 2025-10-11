@@ -1,9 +1,13 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { BrowserMultiFormatReader, type IScannerControls } from '@zxing/browser';
-import { BarcodeFormat, DecodeHintType, NotFoundException } from '@zxing/library';
-import { getValidEAN13 } from '../lib/validators';
+import {
+  BrowserMultiFormatReader,
+  DecodeHintType,
+  BarcodeFormat,
+  IScannerControls,
+} from '@zxing/browser';
+import { NotFoundException, ChecksumException, FormatException } from '@zxing/library';
 
 type Props = {
   open: boolean;
@@ -11,213 +15,221 @@ type Props = {
   onDetected: (code: string) => void;
 };
 
-type ScannerStatus = 'initializing' | 'scanning' | 'detected' | 'error';
+const DETECTED_COOLDOWN_MS = 700;
 
-const DEBUG = Boolean(process.env.NEXT_PUBLIC_DEBUG_SCAN);
-const DETECTED_COOLDOWN_MS = 600;
+/** EAN-13 チェックデジット検証 */
+function isValidEAN13(text: string) {
+  if (!/^\d{13}$/.test(text)) return false;
+  const digits = text.split('').map(Number);
+  const check = digits.pop()!;
+  const sum = digits.reduce((acc, d, i) => acc + d * (i % 2 === 0 ? 1 : 3), 0);
+  return (10 - (sum % 10)) % 10 === check;
+}
+
+/** UPC-A(12桁) を EAN-13 に正規化（先頭0付与）。その他は13桁の数字以外を除外 */
+function normalizeToEAN13(text: string) {
+  const digits = text.replace(/\D/g, '');
+  if (/^\d{13}$/.test(digits)) return digits;
+  if (/^\d{12}$/.test(digits)) return '0' + digits; // UPC-A → EAN-13
+  return null;
+}
 
 export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
-  const isMountedRef = useRef(false);
-
-  const [status, setStatus] = useState<ScannerStatus>('initializing');
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
+  const streamRef = useRef<MediaStream | null>(null);
+  const lastDetectedRef = useRef<number>(0);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!open) return;
     let cancelled = false;
 
-    const cleanUpStream = () => {
-      try {
-        streamRef.current?.getTracks().forEach((track) => track.stop());
-      } catch {
-        /* no-op */
-      }
-      streamRef.current = null;
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
-    };
+    // EAN_13 のみヒント
+    const hints = new Map<DecodeHintType, BarcodeFormat[]>();
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13]);
+    const reader = new BrowserMultiFormatReader(hints);
 
-    if (!open) {
-      cleanUpStream();
-      setStatus('initializing');
-      setError('');
-      return () => {
-        /* nothing */
-      };
+    async function pickBackCamera(): Promise<MediaDeviceInfo | null> {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videos = devices.filter((d) => d.kind === 'videoinput');
+        const back = videos.find((d) => /back|rear|environment/i.test(d.label));
+        return back ?? videos[0] ?? null;
+      } catch {
+        return null;
+      }
     }
 
-    const start = async () => {
+    async function start() {
+      setErrorMsg(null);
       try {
-        setStatus('initializing');
-        setError('');
+        const back = await pickBackCamera();
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: 'environment' },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
+        // iOS安定用：解像度・フレームレートを明示
+        const constraints: MediaStreamConstraints = {
+          video: back
+            ? {
+                deviceId: { exact: back.deviceId },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                frameRate: { ideal: 30, min: 10 },
+              }
+            : {
+                facingMode: { ideal: 'environment' },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                frameRate: { ideal: 30, min: 10 },
+              },
           audio: false,
-        });
-        if (cancelled) {
-          stream.getTracks().forEach((track) => track.stop());
-          return;
-        }
+        };
 
-        if (DEBUG) {
-          console.log('[BarcodeScanner] getUserMedia stream', stream);
-        }
-
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
         streamRef.current = stream;
 
         const video = videoRef.current;
-        if (!video) {
-          throw new Error('カメラ映像を表示できませんでした。');
-        }
+        if (!video) return;
 
         video.srcObject = stream;
-        video.playsInline = true;
-        video.muted = true;
-        await video.play();
 
-        const hints = new Map<DecodeHintType, unknown>();
-        hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13]);
-        hints.set(DecodeHintType.TRY_HARDER, true);
+        // iOS Safari は属性も明示しておくと安定する
+        video.setAttribute('playsinline', '');
+        video.setAttribute('muted', '');
+        video.setAttribute('autoplay', '');
 
-        const reader = new BrowserMultiFormatReader(hints);
-        setStatus('scanning');
+        await video.play().catch(() => {});
 
+        // 端末が特定できていれば deviceId を decode にも渡す（iOSの背面固定）
         controlsRef.current = await reader.decodeFromVideoDevice(
-          undefined,
+          back?.deviceId ?? undefined,
           video,
           (result, err) => {
-            if (cancelled || !isMountedRef.current) return;
-            if (result) {
-              const validCode = getValidEAN13(result.getText());
-              if (!validCode) {
-                return;
-              }
-              setStatus('detected');
-              onDetected(validCode);
-              window.setTimeout(() => {
-                if (!cancelled) {
-                  setStatus('scanning');
-                }
-              }, DETECTED_COOLDOWN_MS);
-              return;
-            }
+            if (cancelled) return;
 
-            if (err instanceof NotFoundException) {
-              if (status !== 'scanning') {
-                setStatus('scanning');
-              }
+            if (result) {
+              const now = Date.now();
+              if (now - lastDetectedRef.current < DETECTED_COOLDOWN_MS) return;
+
+              const maybe = normalizeToEAN13(result.getText());
+              if (!maybe || !isValidEAN13(maybe)) return;
+
+              lastDetectedRef.current = now;
+              onDetected(maybe);
               return;
             }
 
             if (err) {
-              if (DEBUG) {
-                console.warn('[BarcodeScanner] decode error', err);
+              // 未検出系は無視して継続
+              if (
+                err instanceof NotFoundException ||
+                err instanceof ChecksumException ||
+                err instanceof FormatException
+              ) {
+                return;
               }
-              setStatus('error');
-              setError(
-                err instanceof Error
-                  ? err.message
-                  : 'スキャン中にエラーが発生しました。手入力をご利用ください。',
-              );
             }
-          },
+          }
         );
-      } catch (err) {
-        if (DEBUG) {
-          console.warn('[BarcodeScanner] camera start failed', err);
-        }
-        if (!cancelled) {
-          setStatus('error');
-          setError(
-            err instanceof Error
-              ? err.message
-              : 'カメラの起動に失敗しました。手入力でバーコードを入力してください。',
-          );
-        }
+      } catch (e: any) {
+        setErrorMsg(
+          e?.name === 'NotAllowedError'
+            ? 'カメラ使用が許可されていません。ブラウザの設定で許可してください。'
+            : 'カメラを開始できませんでした。HTTPSでのアクセスやデバイスのカメラ権限を確認してください。'
+        );
+      }
+    }
+
+    start();
+
+    // 画面が非表示→再表示のときに再アタッチ（iOS対策）
+    const handleVisibility = async () => {
+      if (document.hidden) {
+        controlsRef.current?.stop();
+        controlsRef.current = null;
+      } else if (!controlsRef.current && videoRef.current?.srcObject) {
+        const back = await pickBackCamera().catch(() => null);
+        reader
+          .decodeFromVideoDevice(
+            back?.deviceId ?? undefined,
+            videoRef.current!,
+            (result, err) => {
+              if (cancelled) return;
+
+              if (result) {
+                const now = Date.now();
+                if (now - lastDetectedRef.current < DETECTED_COOLDOWN_MS) return;
+
+                const maybe = normalizeToEAN13(result.getText());
+                if (!maybe || !isValidEAN13(maybe)) return;
+
+                lastDetectedRef.current = now;
+                onDetected(maybe);
+                return;
+              }
+
+              if (
+                err &&
+                !(err instanceof NotFoundException) &&
+                !(err instanceof ChecksumException) &&
+                !(err instanceof FormatException)
+              ) {
+                // 重大系のみログ
+                // console.debug('[ZXing] error', err);
+              }
+            }
+          )
+          .then((controls) => {
+            if (!cancelled) {
+              controlsRef.current = controls;
+            } else {
+              controls.stop();
+            }
+          })
+          .catch(() => {});
       }
     };
 
-    start().catch((err) => {
-      if (DEBUG) {
-        console.warn('[BarcodeScanner] start sequence failed', err);
-      }
-    });
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
       cancelled = true;
-      try {
-        controlsRef.current?.stop();
-      } catch {
-        /* no-op */
-      } finally {
-        controlsRef.current = null;
+      document.removeEventListener('visibilitychange', handleVisibility);
+      controlsRef.current?.stop();
+      controlsRef.current = null;
+      const s = streamRef.current;
+      if (s) {
+        s.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
       }
-      cleanUpStream();
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
     };
   }, [open, onDetected]);
 
   if (!open) return null;
 
-  const statusLabel =
-    status === 'initializing'
-      ? 'カメラを起動しています…'
-      : status === 'detected'
-        ? '読み取りました'
-        : status === 'error'
-          ? error || 'スキャン中にエラーが発生しました'
-          : '読み取り中…';
-
   return (
-    <div className="fixed inset-0 z-50">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="absolute inset-x-4 top-10 mx-auto w-full max-w-sm rounded-3xl bg-white p-4 shadow-2xl">
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-base font-semibold text-gray-800">カメラから追加</h2>
-          <span className="rounded-xl bg-indigo-100 px-3 py-1 text-xs font-medium text-indigo-700">
-            {statusLabel}
-          </span>
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/80">
+      <div className="w-[92%] max-w-md">
+        <video
+          ref={videoRef}
+          className="w-full rounded-xl border-2 border-white/70"
+          playsInline
+          muted
+          autoPlay
+        />
+        <div className="mt-3 flex items-center justify-between">
+          <button
+            className="rounded-lg bg-white px-4 py-2 text-black"
+            onClick={onClose}
+            aria-label="閉じる"
+          >
+            閉じる
+          </button>
+          {/* エラー時のガイダンス */}
+          {errorMsg && <p className="text-sm text-red-300">{errorMsg}</p>}
         </div>
-
-        <div className="relative overflow-hidden rounded-2xl border border-blue-200 bg-black">
-          <video ref={videoRef} className="h-[280px] w-full object-cover" playsInline muted autoPlay />
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <div
-              className="rounded-2xl border-[5px] border-blue-500/90 bg-blue-400/15 shadow-[0_0_32px_rgba(59,130,246,0.45)]"
-              style={{ width: '70%', height: '40%' }}
-            />
-          </div>
-        </div>
-
-        <div className="mt-3 rounded-2xl bg-amber-50 p-3 text-xs text-amber-800">
-          <p className="font-semibold">📌 スキャンのコツ</p>
-          <ul className="mt-1 list-disc pl-5">
-            <li>バーコードはまっすぐにあててください</li>
-            <li>15〜25cm の距離がベストです</li>
-            <li>明るい場所でご利用ください</li>
-          </ul>
-        </div>
-
-        <button
-          className="mt-4 w-full rounded-2xl bg-gray-200 py-3 text-sm font-semibold text-gray-700"
-          onClick={onClose}
-        >
-          閉じる
-        </button>
       </div>
     </div>
   );
