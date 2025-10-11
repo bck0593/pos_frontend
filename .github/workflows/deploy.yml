@@ -3,16 +3,7 @@ name: Deploy Frontend to Azure Web App
 on:
   push:
     branches: [ "main" ]
-    # この workflow 自体か frontend 配下に変更が入ったときだけ起動
-    paths:
-      - 'frontend/**'
-      - '.github/workflows/deploy.yml'
   workflow_dispatch:
-
-# 同時デプロイを抑止（前回が走ってたらキャンセル）
-concurrency:
-  group: frontend-deploy
-  cancel-in-progress: true
 
 jobs:
   build-and-deploy:
