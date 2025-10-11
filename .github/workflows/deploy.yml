@@ -33,24 +33,43 @@ jobs:
         run: |
           npm ci
           npm run build --no-lint
-          echo "=== .next tree ==="
           ls -la .next || true
           ls -la .next/standalone || true
 
-      - name: Prepare artifact
+      - name: Prepare artifact (out/)
         run: |
           if [ ! -d ".next/standalone" ]; then
-            echo "::error ::.next/standalone not found. Ensure next.config.* has: module.exports = { output: 'standalone' }"
+            echo "::error ::.next/standalone not found. Set output:'standalone' in next.config.*"
             exit 1
           fi
           rm -rf out && mkdir -p out/.next
           cp -r .next/standalone/* out/
           cp -r .next/static out/.next/static
-          if [ -d public ]; then cp -r public out/public; fi
+          [ -d public ] && cp -r public out/public || true
+          # start スクリプトを同梱
           node -e "let p=require('./package.json');p.scripts=p.scripts||{};p.scripts.start='node server.js';require('fs').writeFileSync('out/package.json',JSON.stringify(p,null,2))"
-          echo "=== out tree ==="
-          ls -la out || true
-          test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
+          # Windows App Service 用 iisnode 設定
+          cat > out/web.config <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <system.webServer>
+    <handlers>
+      <add name="iisnode" path="server.js" verb="*" modules="iisnode"/>
+    </handlers>
+    <rewrite>
+      <rules>
+        <rule name="NextJS" stopProcessing="true">
+          <match url=".*"/>
+          <action type="Rewrite" url="server.js"/>
+        </rule>
+      </rules>
+    </rewrite>
+  </system.webServer>
+</configuration>
+EOF
+          ls -la out
+          test -f out/server.js || (echo '::error ::server.js missing' && exit 1)
+          test -f out/web.config || (echo '::error ::web.config missing' && exit 1)
 
       - name: Wait a bit (avoid SCM restart race)
         run: sleep 20
@@ -61,4 +80,4 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           package: out
-          startup-command: "node server.js"
+          # Windows では startup-command を指定しない
