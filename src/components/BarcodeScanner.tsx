@@ -1,8 +1,9 @@
-﻿'use client';
+'use client';
 
 import { useEffect, useRef, useState } from 'react';
 import { BrowserMultiFormatReader, type IScannerControls } from '@zxing/browser';
 import { BarcodeFormat, DecodeHintType, NotFoundException } from '@zxing/library';
+import { getValidEAN13 } from '../lib/validators';
 
 type Props = {
   open: boolean;
@@ -13,33 +14,49 @@ type Props = {
 type ScannerStatus = 'initializing' | 'scanning' | 'detected' | 'error';
 
 const DEBUG = Boolean(process.env.NEXT_PUBLIC_DEBUG_SCAN);
+const DETECTED_COOLDOWN_MS = 600;
 
-function isValidEAN13(code: string): boolean {
-  if (!/^\d{13}$/.test(code)) return false;
-  const digits = code.split('').map(Number);
-  const checkDigit = digits.pop()!;
-  const sum = digits.reduce((acc, d, i) => acc + d * (i % 2 === 0 ? 1 : 3), 0);
-  return (10 - (sum % 10)) % 10 === checkDigit;
-}
-
-export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
-  // ✅ フックは常に先頭で宣言（条件分岐の外）
+export default function BarcodeScanner({ open, onClose, onDetected }: Props): JSX.Element | null {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const controlsRef = useRef<IScannerControls | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const controlsRef = useRef<IScannerControls | null>(null);
+  const isMountedRef = useRef(false);
 
   const [status, setStatus] = useState<ScannerStatus>('initializing');
   const [error, setError] = useState('');
 
   useEffect(() => {
-    let stopped = false;
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
-    // open=false のときは何もしない（フック自体は呼ばれているので OK）
+  useEffect(() => {
+    let cancelled = false;
+
+    const cleanUpStream = () => {
+      try {
+        streamRef.current?.getTracks().forEach((track) => track.stop());
+      } catch {
+        /* no-op */
+      }
+      streamRef.current = null;
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+    };
+
     if (!open) {
-      return () => { /* nothing */ };
+      cleanUpStream();
+      setStatus('initializing');
+      setError('');
+      return () => {
+        /* nothing */
+      };
     }
 
-    (async () => {
+    const start = async () => {
       try {
         setStatus('initializing');
         setError('');
@@ -52,14 +69,21 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
           },
           audio: false,
         });
-        if (stopped) {
-          stream.getTracks().forEach(t => t.stop());
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
           return;
         }
+
+        if (DEBUG) {
+          console.log('[BarcodeScanner] getUserMedia stream', stream);
+        }
+
         streamRef.current = stream;
 
         const video = videoRef.current;
-        if (!video) throw new Error('カメラ要素が見つかりません');
+        if (!video) {
+          throw new Error('カメラ映像を表示できませんでした。');
+        }
 
         video.srcObject = stream;
         video.playsInline = true;
@@ -67,106 +91,124 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         await video.play();
 
         const hints = new Map<DecodeHintType, unknown>();
-        hints.set(DecodeHintType.POSSIBLE_FORMATS, [
-          BarcodeFormat.EAN_13,
-          BarcodeFormat.EAN_8,
-          BarcodeFormat.CODE_128,
-        ]);
+        hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13]);
         hints.set(DecodeHintType.TRY_HARDER, true);
 
         const reader = new BrowserMultiFormatReader(hints);
         setStatus('scanning');
 
-        // 型は (result, err, controls) の3引数
-        const controls = await reader.decodeFromVideoDevice(
+        controlsRef.current = await reader.decodeFromVideoDevice(
           undefined,
           video,
-          (result, err, controls) => {
-            if (stopped) return;
-
+          (result, err) => {
+            if (cancelled || !isMountedRef.current) return;
             if (result) {
-              const raw = result.getText();
-              const normalized = raw.replace(/\D/g, '');
-              if (DEBUG) console.log('[ZXing] raw:', raw, 'normalized:', normalized);
-              if (isValidEAN13(normalized)) {
-                setStatus('detected');
-                stopped = true;
-                try { controls?.stop(); } catch {}
-                try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
-                onDetected(normalized);
-                onClose();
+              const validCode = getValidEAN13(result.getText());
+              if (!validCode) {
+                return;
+              }
+              setStatus('detected');
+              onDetected(validCode);
+              window.setTimeout(() => {
+                if (!cancelled) {
+                  setStatus('scanning');
+                }
+              }, DETECTED_COOLDOWN_MS);
+              return;
+            }
+
+            if (err instanceof NotFoundException) {
+              if (status !== 'scanning') {
+                setStatus('scanning');
               }
               return;
             }
 
-            // NotFound は「見つからなかっただけ」なので無視。他のエラーのみ表示
-            if (err && !(err instanceof NotFoundException)) {
-              if (DEBUG) console.warn('[ZXing] error:', err);
+            if (err) {
+              if (DEBUG) {
+                console.warn('[BarcodeScanner] decode error', err);
+              }
               setStatus('error');
-              setError((err as Error).message ?? 'スキャンに失敗しました');
+              setError(
+                err instanceof Error
+                  ? err.message
+                  : 'スキャン中にエラーが発生しました。手入力をご利用ください。',
+              );
             }
-          }
+          },
         );
-
-        controlsRef.current = controls;
-      } catch (e: unknown) {
-        if (DEBUG) console.warn('Camera start failed:', e);
-        setStatus('error');
-        setError(e instanceof Error ? e.message : 'カメラを起動できませんでした');
+      } catch (err) {
+        if (DEBUG) {
+          console.warn('[BarcodeScanner] camera start failed', err);
+        }
+        if (!cancelled) {
+          setStatus('error');
+          setError(
+            err instanceof Error
+              ? err.message
+              : 'カメラの起動に失敗しました。手入力でバーコードを入力してください。',
+          );
+        }
       }
-    })();
+    };
+
+    start().catch((err) => {
+      if (DEBUG) {
+        console.warn('[BarcodeScanner] start sequence failed', err);
+      }
+    });
 
     return () => {
-      stopped = true;
-      try { controlsRef.current?.stop(); } catch {}
-      try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
-      controlsRef.current = null;
-      streamRef.current = null;
+      cancelled = true;
+      try {
+        controlsRef.current?.stop();
+      } catch {
+        /* no-op */
+      } finally {
+        controlsRef.current = null;
+      }
+      cleanUpStream();
     };
-  }, [open, onClose, onDetected]);
+  }, [open, onDetected]);
 
-  // ここで return null は OK（フック宣言はすでに実行済み）
   if (!open) return null;
 
   const statusLabel =
-    status === 'initializing' ? 'カメラを準備しています…' :
-    status === 'detected'     ? '検出しました' :
-    status === 'error'        ? (error || 'スキャンに失敗しました') :
-                                'スキャン中…';
+    status === 'initializing'
+      ? 'カメラを起動しています…'
+      : status === 'detected'
+        ? '読み取りました'
+        : status === 'error'
+          ? error || 'スキャン中にエラーが発生しました'
+          : '読み取り中…';
 
   return (
     <div className="fixed inset-0 z-50">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
       <div className="absolute inset-x-4 top-10 mx-auto w-full max-w-sm rounded-3xl bg-white p-4 shadow-2xl">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-base font-semibold text-gray-800">カメラで追加</h2>
+          <h2 className="text-base font-semibold text-gray-800">カメラから追加</h2>
           <span className="rounded-xl bg-indigo-100 px-3 py-1 text-xs font-medium text-indigo-700">
             {statusLabel}
           </span>
         </div>
 
-        <div className="relative overflow-hidden rounded-2xl border border-gray-200 bg-black">
-          <video
-            ref={videoRef}
-            className="h-[280px] w-full object-cover"
-            playsInline
-            muted
-            autoPlay
-          />
+        <div className="relative overflow-hidden rounded-2xl border border-blue-200 bg-black">
+          <video ref={videoRef} className="h-[280px] w-full object-cover" playsInline muted autoPlay />
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <div
-              className="rounded-2xl border-4 border-red-500/80 bg-red-500/5"
+              className="rounded-2xl border-[5px] border-blue-500/90 bg-blue-400/15 shadow-[0_0_32px_rgba(59,130,246,0.45)]"
               style={{ width: '70%', height: '40%' }}
             />
           </div>
         </div>
 
         <div className="mt-3 rounded-2xl bg-amber-50 p-3 text-xs text-amber-800">
-          <p className="font-semibold">📷 スキャンのコツ</p>
+          <p className="font-semibold">📌 スキャンのコツ</p>
           <ul className="mt-1 list-disc pl-5">
-            <li>バーコードを赤い枠に合わせる（横にまっすぐ）</li>
-            <li>15〜25cm の距離を保つ</li>
-            <li>明るい場所で手ブレを抑える</li>
+            <li>バーコードはまっすぐにあててください</li>
+            <li>15〜25cm の距離がベストです</li>
+            <li>明るい場所でご利用ください</li>
           </ul>
         </div>
 
