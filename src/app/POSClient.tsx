@@ -85,7 +85,7 @@ type AddProductOptions = {
   focusQuantityOnInsert?: boolean;
 };
 
-export default function POSClient(): JSX.Element {
+export default function POSClient() {
   const [cart, setCart] = useState<CartLine[]>([]);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [manualCode, setManualCode] = useState('');
