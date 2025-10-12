@@ -2,9 +2,12 @@ import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
   output: 'standalone',
-  // ビルドは通す（型/ESLintはCIで済ませる想定）
   typescript: { ignoreBuildErrors: true },
   eslint: { ignoreDuringBuilds: true },
+  turbopack: {
+    // Pin the workspace root so Turbopack ignores lockfiles outside this project.
+    root: __dirname,
+  },
 };
 
 export default nextConfig;
