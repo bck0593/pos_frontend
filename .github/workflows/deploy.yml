@@ -1,22 +1,84 @@
-      - name: Prepare artifact (standalone runtime)
+# .github/workflows/deploy.yml
+name: Deploy Frontend to Azure Web App
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/deploy.yml"
+      - "**/*"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-frontend-azure
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_DISABLE_ESLINT_PLUGIN: "true"
+      NEXT_PUBLIC_BACKEND_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
+      NEXT_PUBLIC_API_BASE: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
+      NEXT_PUBLIC_API_BASE_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sanity check repo root
+        run: |
+          echo "repo root:"; pwd; ls -la
+          test -f package.json || (echo "::error ::package.json not found at repo root"; exit 1)
+
+      - name: Setup Node (with cache)
+        if: ${{ hashFiles('package-lock.json') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+
+      - name: Setup Node (no cache fallback)
+        if: ${{ hashFiles('package-lock.json') == '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install & Build (Next.js standalone)
+        run: |
+          set -e
+          npm ci
+          npm run build --no-lint || npm run build
+          echo "=== list .next ==="; ls -la .next || true
+          echo "=== list .next/standalone ==="; ls -la .next/standalone || true
+          echo "=== list .next/server ==="; ls -la .next/server || true
+          echo "=== list .next/static ==="; ls -la .next/static || true
+          echo "=== preview routes-manifest (if exists) ==="
+          cat .next/routes-manifest.json 2>/dev/null || true
+
+      - name: Prepare artifact (standalone + server bundle)
         run: |
           set -e
           rm -rf out && mkdir -p out/.next
 
-          # 1) Next standalone サーバ一式
+          # 1) Next standalone server entrypoint (includes server.js)
           cp -r .next/standalone/* out/
 
-          # 2) 静的資産
+          # 2) Static assets
           mkdir -p out/.next
           cp -r .next/static out/.next/static
 
-          # 3) ルートの各種マニフェスト
+          # 3) Root-level manifests
           cp .next/*.json out/.next/ 2>/dev/null || true
 
-          # 4) App Router のサーバ実体を同梱（ここが重要）
+          # 4) App Router server code (IMPORTANT: include .next/server/** including app/)
           if [ -d .next/server ]; then
             mkdir -p out/.next/server
-            # マニフェストだけでなく app/ を含むサーバ側コードをコピー
             cp -r .next/server/* out/.next/server/
           fi
 
@@ -26,10 +88,10 @@
           # 6) public
           if [ -d public ]; then cp -r public out/public; fi
 
-          # 7) 実行用 package.json
+          # 7) Minimal runtime package.json (Linux runs node server.js)
           node -e "const fs=require('fs');const pj={name:'next-standalone',version:'0.0.0',private:true,type:'commonjs',main:'server.js',engines:{node:'>=18'},scripts:{start:'node server.js'}};fs.writeFileSync('out/package.json',JSON.stringify(pj,null,2));"
 
-          # 8) web.config（Linuxでは無視）
+          # 8) web.config (ignored on Linux; harmless)
           cat > out/web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
@@ -60,3 +122,14 @@
           test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
           test -f out/.next/BUILD_ID || (echo '::error ::BUILD_ID missing in out/.next/' && exit 1)
           test -f out/.next/routes-manifest.json || (echo '::error ::routes-manifest.json missing in out/.next/' && exit 1)
+
+      - name: Sleep (avoid SCM race)
+        run: sleep 8
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: ./out
+          clean: true
