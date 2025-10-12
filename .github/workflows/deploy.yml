@@ -1,87 +1,35 @@
-# .github/workflows/deploy.yml
-name: Deploy Frontend to Azure Web App
-
-on:
-  push:
-    branches: [ "main" ]
-    paths:
-      - ".github/workflows/deploy.yml"
-      - "**/*"
-  workflow_dispatch:
-
-concurrency:
-  group: deploy-frontend-azure
-  cancel-in-progress: false
-
-jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest
-
-    env:
-      AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
-      NODE_ENV: production
-      NEXT_TELEMETRY_DISABLED: "1"
-      NEXT_DISABLE_ESLINT_PLUGIN: "true"
-      NEXT_PUBLIC_BACKEND_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
-      NEXT_PUBLIC_API_BASE: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
-      NEXT_PUBLIC_API_BASE_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Sanity check repo root
-        run: |
-          echo "repo root:"; pwd; ls -la
-          test -f package.json || (echo "::error ::package.json not found at repo root"; exit 1)
-
-      - name: Setup Node (with cache)
-        if: ${{ hashFiles('package-lock.json') != '' }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: package-lock.json
-
-      - name: Setup Node (no cache fallback)
-        if: ${{ hashFiles('package-lock.json') == '' }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install & Build (Next.js standalone)
-        run: |
-          set -e
-          npm ci
-          npm run build --no-lint
-          echo "=== list .next ==="; ls -la .next || true
-          echo "=== list .next/standalone ==="; ls -la .next/standalone || true
-          echo "=== list .next/static ==="; ls -la .next/static || true
-          echo "=== preview routes-manifest (if exists) ==="
-          cat .next/routes-manifest.json 2>/dev/null || true
-
       - name: Prepare artifact (standalone runtime)
         run: |
           set -e
           rm -rf out && mkdir -p out/.next
-          # server (standalone)
+
+          # 1) Next standalone サーバ一式
           cp -r .next/standalone/* out/
-          # static
+
+          # 2) 静的資産
+          mkdir -p out/.next
           cp -r .next/static out/.next/static
-          # root manifests (routes/build/prerender etc.)
+
+          # 3) ルートの各種マニフェスト
           cp .next/*.json out/.next/ 2>/dev/null || true
-          # server-side manifests (safety)
+
+          # 4) App Router のサーバ実体を同梱（ここが重要）
           if [ -d .next/server ]; then
             mkdir -p out/.next/server
-            cp -r .next/server/*.json out/.next/server/ 2>/dev/null || true
+            # マニフェストだけでなく app/ を含むサーバ側コードをコピー
+            cp -r .next/server/* out/.next/server/
           fi
-          # BUILD_ID
+
+          # 5) BUILD_ID
           cp .next/BUILD_ID out/.next/BUILD_ID
-          # public
+
+          # 6) public
           if [ -d public ]; then cp -r public out/public; fi
-          # minimal runtime package.json
+
+          # 7) 実行用 package.json
           node -e "const fs=require('fs');const pj={name:'next-standalone',version:'0.0.0',private:true,type:'commonjs',main:'server.js',engines:{node:'>=18'},scripts:{start:'node server.js'}};fs.writeFileSync('out/package.json',JSON.stringify(pj,null,2));"
-          # web.config (ignored on Linux)
+
+          # 8) web.config（Linuxでは無視）
           cat > out/web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
@@ -104,18 +52,11 @@ jobs:
             </system.webServer>
           </configuration>
           EOF
-          echo "=== out tree ==="; ls -la out; echo "=== out/.next ==="; ls -la out/.next
+
+          echo "=== out tree ==="; ls -la out
+          echo "=== out/.next ==="; ls -la out/.next
+          echo "=== out/.next/server (should contain app/) ==="; ls -la out/.next/server || true
+
           test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
           test -f out/.next/BUILD_ID || (echo '::error ::BUILD_ID missing in out/.next/' && exit 1)
           test -f out/.next/routes-manifest.json || (echo '::error ::routes-manifest.json missing in out/.next/' && exit 1)
-
-      - name: Sleep (avoid SCM race)
-        run: sleep 8
-
-      - name: Deploy to Azure Web App
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: ./out
-          clean: true
