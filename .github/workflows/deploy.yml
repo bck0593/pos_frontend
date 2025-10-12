@@ -9,14 +9,24 @@ on:
       - "**/*"
   workflow_dispatch:
 
+concurrency:
+  group: deploy-frontend-azure
+  cancel-in-progress: false
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
     env:
+      # ---- Azure Web App name (Linux, Node 22 コンテナ) ----
       AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
+
+      # ---- Next.js/Build 環境 ----
+      NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
       NEXT_DISABLE_ESLINT_PLUGIN: "true"
+
+      # ---- 重要：ビルド時に Rewrites の宛先を焼き込む ----
       NEXT_PUBLIC_BACKEND_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
       NEXT_PUBLIC_API_BASE: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
       NEXT_PUBLIC_API_BASE_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
@@ -45,37 +55,45 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install & Build
+      - name: Install & Build (Next.js standalone)
         run: |
+          set -e
           npm ci
           npm run build --no-lint
+
           echo "=== list .next ==="; ls -la .next || true
           echo "=== list .next/standalone ==="; ls -la .next/standalone || true
+          echo "=== list .next/static ==="; ls -la .next/static || true
+
+          # バックエンド URL がバンドルに含まれているか簡易チェック（失敗時は落とす）
           echo "=== sanity check: backend URL embedded ==="
           (grep -R "app-002-gen10-step3-1-py-oshima29" -n .next || (echo "::error ::Backend URL not found in client bundle"; exit 1))
 
-      - name: Prepare artifact
+      - name: Prepare artifact (standalone runtime)
         run: |
           set -e
           rm -rf out && mkdir -p out/.next
-          # サーバ（standalone）一式
+
+          # ---- サーバ（standalone）一式 ----
           cp -r .next/standalone/* out/
-          # 静的資産
+
+          # ---- 静的資産（必須）----
           cp -r .next/static out/.next/static
-          # ★ Next の起動に必須：BUILD_ID を同梱
+
+          # ---- BUILD_ID（必須）----
           cp .next/BUILD_ID out/.next/BUILD_ID
 
-          # public があれば同梱
+          # ---- public（あれば）----
           if [ -d public ]; then cp -r public out/public; fi
 
-          # ★ 最小の package.json を新規生成（prestart/postinstall 等を含めない）
+          # ---- 最小 package.json（pre/post スクリプト無・安全）----
           node -e "const fs=require('fs');const pj={ \
             name:'next-standalone', version:'0.0.0', private:true, \
             type:'commonjs', main:'server.js', engines:{node:'>=18'}, \
             scripts:{ start:'node server.js' } \
           }; fs.writeFileSync('out/package.json', JSON.stringify(pj,null,2));"
 
-          # （Windowsでも動作）web.config を同梱（Linux では無視される）
+          # ---- Windows/IIS 向け web.config（Linuxでは無視されるが無害）----
           cat > out/web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
@@ -99,12 +117,14 @@ jobs:
           </configuration>
           EOF
 
-          echo "=== out tree ==="; ls -la out
+          echo "=== out tree (top) ==="; ls -la out
+          echo "=== out/.next ==="; ls -la out/.next
           test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
           test -f out/.next/BUILD_ID || (echo '::error ::BUILD_ID missing in out/.next/' && exit 1)
 
+      # Azure 側の OneDeploy 競合回避
       - name: Sleep (avoid SCM race)
-        run: sleep 10
+        run: sleep 8
 
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
@@ -112,4 +132,4 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           package: ./out
-          clean: true   # 展開先をクリーンにしてから配置
+          clean: true
