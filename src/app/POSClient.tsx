@@ -1,10 +1,11 @@
-// src/app/POSClient.tsx
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import BarcodeScanner from '../components/BarcodeScanner';
-import ScanResultModal from '../components/ScanResultModal';
+// ✨ 変更点：BarcodeScanner を動的 import（SSR無効）
+import dynamic from 'next/dynamic';
+const BarcodeScanner = dynamic(() => import('../components/BarcodeScanner'), { ssr: false });
+
 import {
   fetchProductByCode,
   submitPurchase,
@@ -90,26 +91,15 @@ type AddProductOptions = {
 export default function POSClient() {
   const [cart, setCart] = useState<CartLine[]>([]);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
-
-  // 手入力関連（残す）
   const [manualCode, setManualCode] = useState('');
   const [pendingProduct, setPendingProduct] = useState<ItemMaster | null>(null);
   const [pendingQuantity, setPendingQuantity] = useState(1);
-
-  // 通知・UI
   const [errors, setErrors] = useState<ErrorChip[]>([]);
   const [toastMessage, setToastMessage] = useState('');
-
-  // スキャナ・モーダルの状態
   const [isScannerOpen, setScannerOpen] = useState(false);
-  const [scanResultOpen, setScanResultOpen] = useState(false);
-  const [scannedProduct, setScannedProduct] = useState<ItemMaster | null>(null);
-
-  // 会計モーダル
   const [isCheckoutOpen, setCheckoutOpen] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
 
-  // Refs
   const lastLookupKeyRef = useRef<string | null>(null);
   const lastInvalidCodeRef = useRef<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -350,7 +340,6 @@ export default function POSClient() {
     }
   }, [cart, pushError, resetManualFields, showToast]);
 
-  // ====== スキャン検出 → 結果モーダルを出す（ここが大きな変更）======
   const handleScanDetected = useCallback(
     async (rawCode: string) => {
       const normalizedInput = normalizeEAN13(rawCode);
@@ -380,14 +369,11 @@ export default function POSClient() {
           pushError(`コード ${validCode} は登録されていません。`);
           return;
         }
-        // スキャナはいったん閉じ、結果モーダルにバトン渡し
-        setScannerOpen(false);
-        setScannedProduct({
-          code: product.code,
-          name: product.name,
-          unitPrice: product.unit_price,
-        });
-        setScanResultOpen(true);
+        addOrIncrementProduct(
+          { code: product.code, name: product.name, unitPrice: product.unit_price },
+          1,
+          { updateManualFields: false, focusQuantityOnInsert: false },
+        );
       } catch {
         pushError('バーコードの読み込みに失敗しました。', {
           label: '再スキャン',
@@ -395,9 +381,8 @@ export default function POSClient() {
         });
       }
     },
-    [pushError],
+    [addOrIncrementProduct, pushError],
   );
-  // ===============================================================
 
   useEffect(() => {
     const sanitized = sanitizeEAN13Input(manualCode);
@@ -536,7 +521,6 @@ export default function POSClient() {
             スキャン（カメラ）
           </button>
 
-          {/* 手入力は残す */}
           <div className="mt-4 space-y-3 text-sm">
             <input
               value={manualCode}
@@ -565,7 +549,7 @@ export default function POSClient() {
               <div className="flex items-center justify-between rounded-2xl border border-[#e3e8ff] bg-white px-3 py-2 shadow-inner shadow-blue-100/30">
                 <button
                   type="button"
-                  onClick={() => setPendingQuantity((q) => clampQuantity(q - 1))}
+                  onClick={() => adjustQuantity(-1)}
                   className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#eef2ff] text-lg font-semibold text-neutral-700 transition hover:bg-[#dde4ff]"
                   aria-label="数量を1減らす"
                 >
@@ -578,15 +562,12 @@ export default function POSClient() {
                   min={MIN_QUANTITY}
                   max={MAX_QUANTITY}
                   value={pendingQuantity}
-                  onChange={(e) => {
-                    const v = Number.parseInt(e.target.value || '0', 10);
-                    setPendingQuantity(clampQuantity(Number.isNaN(v) ? MIN_QUANTITY : v));
-                  }}
+                  onChange={(event) => handleQuantityInputChange(event.target.value)}
                   className="w-16 text-center text-sm font-semibold text-neutral-700 focus:outline-none"
                 />
                 <button
                   type="button"
-                  onClick={() => setPendingQuantity((q) => clampQuantity(q + 1))}
+                  onClick={() => adjustQuantity(1)}
                   className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#eef2ff] text-lg font-semibold text-neutral-700 transition hover:bg-[#dde4ff]"
                   aria-label="数量を1増やす"
                 >
@@ -695,32 +676,12 @@ export default function POSClient() {
         </div>
       </div>
 
-      {/* スキャナ */}
       <BarcodeScanner
         open={isScannerOpen}
         onClose={() => setScannerOpen(false)}
         onDetected={(code) => void handleScanDetected(code)}
       />
 
-      {/* スキャン結果モーダル（数量調整→追加 or 追加して続けてスキャン） */}
-      <ScanResultModal
-        open={scanResultOpen}
-        item={scannedProduct}
-        onClose={() => setScanResultOpen(false)}
-        onAdd={(qty) => {
-          if (!scannedProduct) return;
-          addOrIncrementProduct(scannedProduct, qty, { updateManualFields: false, focusQuantityOnInsert: false });
-          setScanResultOpen(false);
-        }}
-        onAddAndContinue={(qty) => {
-          if (!scannedProduct) return;
-          addOrIncrementProduct(scannedProduct, qty, { updateManualFields: false, focusQuantityOnInsert: false });
-          setScanResultOpen(false);
-          setScannerOpen(true); // 続けてスキャン
-        }}
-      />
-
-      {/* 会計モーダル */}
       {isCheckoutOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
           <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-3xl bg-white p-6 shadow-xl ring-1 ring-neutral-200">
