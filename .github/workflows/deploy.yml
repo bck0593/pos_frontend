@@ -62,10 +62,13 @@ jobs:
           cp -r .next/standalone/* out/
           # 静的資産
           cp -r .next/static out/.next/static
+          # ★ Next の起動に必須：BUILD_ID を同梱
+          cp .next/BUILD_ID out/.next/BUILD_ID
+
           # public があれば同梱
           if [ -d public ]; then cp -r public out/public; fi
 
-          # ★ 最小の package.json を新規生成（prestart/postinstall 等を一切含めない）
+          # ★ 最小の package.json を新規生成（prestart/postinstall 等を含めない）
           node -e "const fs=require('fs');const pj={ \
             name:'next-standalone', version:'0.0.0', private:true, \
             type:'commonjs', main:'server.js', engines:{node:'>=18'}, \
@@ -98,6 +101,7 @@ jobs:
 
           echo "=== out tree ==="; ls -la out
           test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
+          test -f out/.next/BUILD_ID || (echo '::error ::BUILD_ID missing in out/.next/' && exit 1)
 
       - name: Sleep (avoid SCM race)
         run: sleep 10
