@@ -12,11 +12,16 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+
+    # 👇 ここでビルド時に埋め込む環境変数を定義（重要）
     env:
       AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
       NEXT_TELEMETRY_DISABLED: "1"
-      # ESLint プラグインが無くても落ちないように
       NEXT_DISABLE_ESLINT_PLUGIN: "true"
+      # ===== バックエンド（FastAPI）のベースURLを“ビルド時”に注入 =====
+      NEXT_PUBLIC_BACKEND_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
+      NEXT_PUBLIC_API_BASE: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
+      NEXT_PUBLIC_API_BASE_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
 
     steps:
       - name: Checkout
@@ -27,20 +32,32 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          # ルート直下の lock をキャッシュ
           cache-dependency-path: |
             package-lock.json
             npm-shrinkwrap.json
 
+      - name: Show env for debug (masked in logs)
+        run: |
+          echo "AZURE_WEBAPP_NAME=$AZURE_WEBAPP_NAME"
+          echo "NEXT_PUBLIC_API_BASE=$NEXT_PUBLIC_API_BASE"
+
+      - name: Ensure API_BASE is set (fail fast if empty)
+        run: |
+          if [ -z "${NEXT_PUBLIC_API_BASE}${NEXT_PUBLIC_API_BASE_URL}${NEXT_PUBLIC_BACKEND_URL}" ]; then
+            echo "::error ::API base URL is empty at build time."
+            exit 1
+          fi
+
       - name: Install deps & build (Next standalone)
         run: |
           npm ci
-          # Lint をスキップ（型は next.config で無視していない限りチェックされます）
           npm run build --no-lint
           echo "=== list .next ==="
           ls -la .next || true
           echo "=== list .next/standalone ==="
           ls -la .next/standalone || true
+          echo "=== sanity check: compiled files should contain 'py-oshima29' ==="
+          (grep -R "app-002-gen10-step3-1-py-oshima29" -n .next && echo "OK") || (echo "::error ::Backend URL not found in compiled bundle"; exit 1)
 
       - name: Prepare artifact
         run: |
@@ -56,10 +73,11 @@ jobs:
           cp -r .next/static out/.next/static
           # public があれば同梱
           if [ -d public ]; then cp -r public out/public; fi
-          # start スクリプトを明示
+
+          # start スクリプトを明示（Linux App Serviceで npm start を拾わせる想定）
           node -e "let p=require('./package.json');p.scripts=p.scripts||{};p.scripts.start='node server.js';require('fs').writeFileSync('out/package.json',JSON.stringify(p,null,2))"
 
-          # --- Windows App Service 用 web.config（iisnode -> server.js） ---
+          # Windows App Service 用の web.config（Linux では無視されるが同梱しても無害）
           cat > out/web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
@@ -97,4 +115,3 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           package: out
-          # Windows + publish-profile では startup-command は使えないので未指定
