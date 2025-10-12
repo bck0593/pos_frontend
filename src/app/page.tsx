@@ -1,9 +1,9 @@
-import dynamic from 'next/dynamic';
+import NextDynamic from 'next/dynamic';
 
-// このページはSSRさせず、クライアントでのみ描画
+// Next のルート設定（これは文字列エクスポート）
 export const dynamic = 'force-dynamic';
 
-const POSClient = dynamic(() => import('./POSClient'), {
+const POSClient = NextDynamic(() => import('./POSClient'), {
   ssr: false,
   loading: () => (
     <main className="mx-auto flex min-h-screen w-full max-w-[360px] items-center justify-center bg-[#f4f6fb] px-4">
