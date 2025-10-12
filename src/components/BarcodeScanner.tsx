@@ -1,213 +1,146 @@
 'use client';
-
-import { useEffect, useRef, useState } from 'react';
-import { BrowserMultiFormatReader, IScannerControls } from '@zxing/browser';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  BrowserMultiFormatReader,
+  IScannerControls,
+} from '@zxing/browser';
 import {
   DecodeHintType,
   BarcodeFormat,
-  NotFoundException,
-  ChecksumException,
-  FormatException,
 } from '@zxing/library';
 
 type Props = {
-  open: boolean;
-  onClose: () => void;
   onDetected: (code: string) => void;
+  timeoutMs?: number; // デフォ10秒でスキャン1回を諦める
 };
 
-const DETECTED_COOLDOWN_MS = 700; // 連続検出の過剰トリガー抑制
+const DETECT_COOLDOWN_MS = 700;
 
-function isValidEAN13(text: string) {
-  if (!/^\d{13}$/.test(text)) return false;
-  const digits = text.split('').map(Number);
-  const check = digits.pop()!;
-  const sum = digits.reduce((acc, digit, idx) => acc + digit * (idx % 2 === 0 ? 1 : 3), 0);
-  return (10 - (sum % 10)) % 10 === check;
-}
-
-export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
+export default function BarcodeScanner({ onDetected, timeoutMs = 10_000 }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const lastDetectedRef = useRef<number>(0);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!open) return;
     let cancelled = false;
-
-    // ZXing のヒント設定（EAN-13 のみ）
-    const hints = new Map();
-    hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13]);
-
-    // ★ ここが今回の修正点：第2引数は数値ではなくオプションオブジェクト
-    const reader = new BrowserMultiFormatReader(hints, {
-      delayBetweenScanAttempts: DETECTED_COOLDOWN_MS,
-      delayBetweenScanSuccess: DETECTED_COOLDOWN_MS,
-    });
-
-    async function pickBackCamera(): Promise<MediaDeviceInfo | null> {
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const videos = devices.filter((d) => d.kind === 'videoinput');
-        // ラベルに "back/rear/environment" を含むものを優先（iOS Safari は https + 許可後でないと label が出ないことあり）
-        const back = videos.find((d) => /back|rear|environment/i.test(d.label));
-        return back ?? videos[0] ?? null;
-      } catch {
-        return null;
-      }
-    }
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let stream: MediaStream | null = null;
 
     async function start() {
-      setErrorMsg(null);
+      if (!videoRef.current) return;
+      setError(null);
+      setBusy(true);
+
+      // 1) まず軽くgetUserMediaを叩いて、iOSでenumerateDevicesが空になるのを回避
       try {
-        const back = await pickBackCamera();
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        stream.getTracks().forEach(t => t.stop());
+      } catch (e) {
+        // ここで失敗しても後続のdecodeOnceで再度トライするので握り潰す
+      }
 
-        // iOS Safari 向けに environment を理想指定、取れるなら deviceId を使う
-        const constraints: MediaStreamConstraints = {
-          video: back
-            ? { deviceId: { exact: back.deviceId } }
-            : {
-                facingMode: { ideal: 'environment' },
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
-              },
-          audio: false,
-        };
+      // 2) ヒント：EAN系に限定
+      const hints = new Map();
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8]);
 
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        streamRef.current = stream;
+      const reader = new BrowserMultiFormatReader(hints, {
+        delayBetweenScanAttempts: DETECT_COOLDOWN_MS,
+      });
 
-        const video = videoRef.current;
-        if (!video) return;
-
-        video.srcObject = stream;
-        // iOS Safari でインライン再生を有効化
-        video.setAttribute('playsinline', 'true');
-        await video.play();
-
-        controlsRef.current = await reader.decodeFromVideoDevice(undefined, video, (result, err) => {
-          if (cancelled) return;
-
-          if (result) {
-            const now = Date.now();
-            if (now - lastDetectedRef.current < DETECTED_COOLDOWN_MS) return;
-            const raw = result.getText().replace(/\D/g, '');
-            if (!isValidEAN13(raw)) return;
-            lastDetectedRef.current = now;
-            onDetected(raw);
-            return;
-          }
-
-          if (
-            err &&
-            (err instanceof NotFoundException ||
-              err instanceof ChecksumException ||
-              err instanceof FormatException)
-          ) {
-            // 未検出・チェックサム不一致・形式不正は黙って再試行
-            return;
-          }
-        });
-      } catch (error: any) {
-        if (error?.name === 'NotAllowedError') {
-          setErrorMsg('カメラ使用が許可されていません。ブラウザの設定で許可してください。');
-        } else if (window.isSecureContext === false) {
-          setErrorMsg('HTTPS でのアクセスが必要です。https でページを開いてください。');
-        } else {
-          setErrorMsg('カメラを開始できませんでした。デバイスのカメラ権限や https を確認してください。');
+      // 3) できれば背面カメラのdeviceIdを選ぶ
+      async function pickBackCamera(): Promise<string | undefined> {
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const videos = devices.filter(d => d.kind === 'videoinput');
+          // labelにback/後面/環境などが含まれるもの優先
+          const back = videos.find(d => /back|rear|environment|後面|背面/i.test(d.label));
+          return (back ?? videos[0])?.deviceId;
+        } catch {
+          return undefined;
         }
+      }
+
+      // 4) iOS対応：まずfacingMode指定→失敗ならdeviceId
+      async function startDecode() {
+        const vid = videoRef.current!;
+        // video属性：iOSの自動再生抑止対策
+        vid.setAttribute('playsinline', 'true');
+        vid.muted = true;
+
+        const deviceId = await pickBackCamera();
+
+        try {
+          // facingModeでまず挑戦（iOS 16+ で安定）
+          const res = await reader.decodeOnceFromConstraints(
+            {
+              audio: false,
+              video: {
+                facingMode: { exact: 'environment' },
+              },
+            },
+            vid,
+          );
+          return res;
+        } catch {
+          // 次にdeviceIdで再トライ
+          try {
+            const res = await reader.decodeOnceFromVideoDevice(deviceId, vid);
+            return res;
+          } catch (e2) {
+            throw e2;
+          }
+        }
+      }
+
+      // 5) タイムアウト
+      const deadline = new Promise<never>((_, rej) => {
+        timeoutId = setTimeout(() => rej(new Error('timeout')), timeoutMs);
+      });
+
+      try {
+        const result = await Promise.race([startDecode(), deadline]);
+        if (!cancelled && result) {
+          // 軽いフィードバック
+          if (navigator.vibrate) navigator.vibrate(50);
+          onDetected((result as any).getText?.() ?? (result as any).text ?? '');
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setError(e?.message ?? String(e));
+        }
+      } finally {
+        controlsRef.current = reader as unknown as IScannerControls;
+        setBusy(false);
       }
     }
 
     start();
 
-    // タブが非表示になったら一時停止、復帰で再開
-    const handleVisibility = () => {
-      if (document.hidden) {
-        controlsRef.current?.stop();
-        controlsRef.current = null;
-      } else if (!controlsRef.current && videoRef.current?.srcObject) {
-        reader
-          .decodeFromVideoDevice(undefined, videoRef.current!, (result, err) => {
-            if (cancelled) return;
-
-            if (result) {
-              const now = Date.now();
-              if (now - lastDetectedRef.current < DETECTED_COOLDOWN_MS) return;
-              const raw = result.getText().replace(/\D/g, '');
-              if (!isValidEAN13(raw)) return;
-              lastDetectedRef.current = now;
-              onDetected(raw);
-              return;
-            }
-
-            if (
-              err &&
-              (err instanceof NotFoundException ||
-                err instanceof ChecksumException ||
-                err instanceof FormatException)
-            ) {
-              return;
-            }
-          })
-          .then((controls) => {
-            if (!cancelled) controlsRef.current = controls;
-            else controls.stop();
-          })
-          .catch(() => {
-            /* noop */
-          });
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibility);
-
-    // クリーンアップ
     return () => {
       cancelled = true;
-      document.removeEventListener('visibilitychange', handleVisibility);
-      try {
-        controlsRef.current?.stop();
-      } catch {
-        /* noop */
-      } finally {
-        controlsRef.current = null;
+      if (timeoutId) clearTimeout(timeoutId);
+      // ZXingのstop
+      try { controlsRef.current?.stop(); } catch {}
+      // videoのストリーム停止
+      if (videoRef.current?.srcObject instanceof MediaStream) {
+        (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+        videoRef.current.srcObject = null;
       }
-      const stream = streamRef.current;
-      if (stream) {
-        stream.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
-      const v = videoRef.current;
-      if (v) v.srcObject = null;
     };
-  }, [open, onDetected]);
-
-  if (!open) return null;
+  }, [onDetected, timeoutMs]);
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/80">
-      <div className="w-[92%] max-w-md">
-        <video
-          ref={videoRef}
-          className="w-full rounded-xl border-2 border-white/70"
-          playsInline
-          // muted/autoPlay は video.play() 前提で、属性も付けておく（iOS 対策）
-          muted
-          autoPlay
-        />
-        <div className="mt-3 flex items-center justify-between">
-          <button
-            className="rounded-lg bg-white px-4 py-2 text-black"
-            onClick={onClose}
-            aria-label="閉じる"
-          >
-            閉じる
-          </button>
-          {errorMsg && <p className="ml-3 text-sm text-red-300">{errorMsg}</p>}
-        </div>
-      </div>
+    <div className="flex flex-col gap-2">
+      <video
+        ref={videoRef}
+        className="w-full aspect-[3/4] bg-black rounded-md"
+        autoPlay
+        playsInline
+        muted
+      />
+      {busy && <p className="text-sm text-gray-500">カメラ起動中…</p>}
+      {error && <p className="text-sm text-red-600">スキャン失敗: {error}</p>}
     </div>
   );
 }
