@@ -1,52 +1,3 @@
-# .github/workflows/deploy.yml
-name: Deploy Frontend to Azure Web App
-
-on:
-  push:
-    branches: [ "main" ]
-    paths:
-      - ".github/workflows/deploy.yml"
-      - "**/*"
-  workflow_dispatch:
-
-concurrency:
-  group: deploy-frontend-azure
-  cancel-in-progress: false
-
-jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest
-
-    env:
-      AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
-      NODE_ENV: production
-      NEXT_TELEMETRY_DISABLED: "1"
-      NEXT_DISABLE_ESLINT_PLUGIN: "true"
-      NEXT_PUBLIC_BACKEND_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
-      NEXT_PUBLIC_API_BASE: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
-      NEXT_PUBLIC_API_BASE_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: package-lock.json
-
-      - name: Install & Build (Next.js standalone)
-        run: |
-          set -e
-          npm ci
-          npm run build --no-lint
-          echo "=== list .next ==="; ls -la .next || true
-          echo "=== list .next/standalone ==="; ls -la .next/standalone || true
-          echo "=== list .next/server ==="; ls -la .next/server || true
-          echo "=== preview routes-manifest ==="; cat .next/routes-manifest.json 2>/dev/null || true
-
       - name: Prepare artifact (standalone runtime)
         run: |
           set -e
@@ -54,35 +5,32 @@ jobs:
           rm -rf out && mkdir -p out
           echo "=== tree .next ==="; ls -la .next || true
           echo "=== tree .next/standalone ==="; ls -la .next/standalone || true
+          echo "=== tree .next/server ==="; ls -la .next/server || true
 
-          # 1) Next の standalone 一式を丸ごと展開
+          # 1) Next standalone を展開（server.js / node_modules など）
           cp -a .next/standalone/. out/
 
-          # 2) 静的資産を補完
+          # 2) 静的資産は .next 配下に
           mkdir -p out/.next
           cp -a .next/static out/.next/static
 
-          # 3) ルートの各種マニフェストを補完
+          # 3) ルートのマニフェスト類
           cp -a .next/*.json out/.next/ 2>/dev/null || true
-
-          # 4) （重要）server/app が無ければ .next/server から補完
-          if [ ! -d "out/server/app" ] && [ -d ".next/server/app" ]; then
-            mkdir -p out/.next/server
-            cp -a .next/server/. out/.next/server/ 2>/dev/null || true
-            mkdir -p out/server
-            cp -a .next/server/app out/server/app
-          fi
-
-          # 5) BUILD_ID
           cp .next/BUILD_ID out/.next/BUILD_ID
 
-          # 6) public
+          # 4) ★重要★ app router のサーバ実体は out/server/* に配置（.next ではない）
+          if [ -d ".next/server" ]; then
+            mkdir -p out/server
+            cp -a .next/server/. out/server/
+          fi
+
+          # 5) public
           if [ -d public ]; then cp -a public out/public; fi
 
-          # 7) 実行用 package.json
+          # 6) 実行用 package.json（npm start で node server.js）
           node -e "const fs=require('fs');const pj={name:'next-standalone',version:'0.0.0',private:true,type:'commonjs',main:'server.js',engines:{node:'>=18'},scripts:{start:'node server.js'}};fs.writeFileSync('out/package.json',JSON.stringify(pj,null,2));"
 
-          # 8) web.config（Linuxでは無視）
+          # 7) web.config（Linuxでは無視、念のため）
           cat > out/web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
@@ -111,18 +59,7 @@ jobs:
           echo "=== verify out/server ==="; ls -la out/server || true
           echo "=== verify out/server/app ==="; ls -la out/server/app || true
 
-          # 必須ファイル確認（無ければ失敗させて原因をログに出す）
+          # 必須チェック
           test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
           test -f out/.next/BUILD_ID || (echo '::error ::BUILD_ID missing in out/.next/' && exit 1)
-          test -d out/server/app || (echo '::error ::server/app missing in artifact (App Router code not included)' && exit 1)
-
-      - name: Sleep (avoid SCM race)
-        run: sleep 8
-
-      - name: Deploy to Azure Web App
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: ./out
-          clean: true
+          test -d out/server/app || (echo '::error ::out/server/app missing (App Router not included)' && exit 1)
