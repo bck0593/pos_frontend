@@ -1,3 +1,4 @@
+// src/app/POSClient.tsx
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -134,9 +135,7 @@ export default function POSClient() {
 
   const showToast = useCallback((message: string) => {
     setToastMessage(message);
-    if (toastTimerRef.current) {
-      window.clearTimeout(toastTimerRef.current);
-    }
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => {
       setToastMessage('');
       toastTimerRef.current = null;
@@ -149,17 +148,11 @@ export default function POSClient() {
       if (!line) return;
       setSelectedCode(code);
       setManualCode(code);
-      setPendingProduct({
-        code: line.code,
-        name: line.name,
-        unitPrice: line.unitPrice,
-      });
+      setPendingProduct({ code: line.code, name: line.name, unitPrice: line.unitPrice });
       setPendingQuantity(line.quantity);
       lastLookupKeyRef.current = code;
       lastInvalidCodeRef.current = null;
-      window.requestAnimationFrame(() => {
-        quantityInputRef.current?.focus();
-      });
+      window.requestAnimationFrame(() => quantityInputRef.current?.focus());
     },
     [cart],
   );
@@ -208,23 +201,16 @@ export default function POSClient() {
         setManualCode(product.code);
         setPendingProduct(product);
         lastLookupKeyRef.current = product.code;
-      }
-
-      if (updateManualFields) {
         lastInvalidCodeRef.current = null;
       }
 
       if (wasExisting) {
         showToast(`${product.name}を${safeQuantity}点追加（合計 ${finalQuantity}点）しました。`);
-        window.requestAnimationFrame(() => {
-          scannerButtonRef.current?.focus();
-        });
+        window.requestAnimationFrame(() => scannerButtonRef.current?.focus());
       } else {
         showToast(`${product.name}を${finalQuantity}点で追加しました。`);
         if (focusQuantityOnInsert) {
-          window.requestAnimationFrame(() => {
-            quantityInputRef.current?.focus();
-          });
+          window.requestAnimationFrame(() => quantityInputRef.current?.focus());
         }
       }
     },
@@ -254,17 +240,11 @@ export default function POSClient() {
           pushError(`コード ${normalizedCode} は登録されていません。`);
           return;
         }
-        product = {
-          code: fetched.code,
-          name: fetched.name,
-          unitPrice: fetched.unit_price,
-        };
+        product = { code: fetched.code, name: fetched.name, unitPrice: fetched.unit_price };
       } catch {
         pushError('商品情報の取得に失敗しました。', {
           label: '再試行',
-          handler: () => {
-            void handleManualAdd();
-          },
+          handler: () => void handleManualAdd(),
         });
         return;
       }
@@ -275,9 +255,7 @@ export default function POSClient() {
     setPendingProduct(null);
     setManualCode('');
     lastLookupKeyRef.current = null;
-    window.requestAnimationFrame(() => {
-      scannerButtonRef.current?.focus();
-    });
+    window.requestAnimationFrame(() => scannerButtonRef.current?.focus());
   }, [addOrIncrementProduct, manualCode, pendingProduct, pendingQuantity, pushError, showToast]);
 
   const handleDeleteLine = useCallback(
@@ -308,11 +286,8 @@ export default function POSClient() {
       setPendingQuantity((prev) => {
         const next = clampQuantity(prev + delta);
         if (next === prev) {
-          if (prev === MIN_QUANTITY && delta < 0) {
-            showToast('数量は1点以上です。');
-          } else if (prev === MAX_QUANTITY && delta > 0) {
-            showToast(`数量は${MAX_QUANTITY}点までです。`);
-          }
+          if (prev === MIN_QUANTITY && delta < 0) showToast('数量は1点以上です。');
+          else if (prev === MAX_QUANTITY && delta > 0) showToast(`数量は${MAX_QUANTITY}点までです。`);
           return prev;
         }
         return next;
@@ -338,17 +313,12 @@ export default function POSClient() {
     [showToast],
   );
 
-
-
   const handleConfirmCheckout = useCallback(async () => {
     if (cart.length === 0) {
       pushError('カートが空です。');
       return;
     }
-    const payload: PurchaseLineRequest[] = cart.map((line) => ({
-      code: line.code,
-      qty: line.quantity,
-    }));
+    const payload: PurchaseLineRequest[] = cart.map((line) => ({ code: line.code, qty: line.quantity }));
 
     setIsConfirming(true);
     try {
@@ -361,9 +331,7 @@ export default function POSClient() {
     } catch {
       pushError('会計処理でエラーが発生しました。', {
         label: 'もう一度購入',
-        handler: () => {
-          void handleConfirmCheckout();
-        },
+        handler: () => void handleConfirmCheckout(),
       });
     } finally {
       setIsConfirming(false);
@@ -400,20 +368,14 @@ export default function POSClient() {
           return;
         }
         addOrIncrementProduct(
-          {
-            code: product.code,
-            name: product.name,
-            unitPrice: product.unit_price,
-          },
+          { code: product.code, name: product.name, unitPrice: product.unit_price },
           1,
           { updateManualFields: false, focusQuantityOnInsert: false },
         );
       } catch {
         pushError('バーコードの読み込みに失敗しました。', {
           label: '再スキャン',
-          handler: () => {
-            void handleScanDetected(validCode);
-          },
+          handler: () => void handleScanDetected(validCode),
         });
       }
     },
@@ -456,9 +418,7 @@ export default function POSClient() {
     }
     lastInvalidCodeRef.current = null;
 
-    if (lastLookupKeyRef.current === sanitized) {
-      return;
-    }
+    if (lastLookupKeyRef.current === sanitized) return;
 
     let cancelled = false;
     (async () => {
@@ -466,17 +426,9 @@ export default function POSClient() {
         const product = await fetchProductByCode(sanitized);
         if (cancelled) return;
         if (product) {
-          setPendingProduct({
-            code: product.code,
-            name: product.name,
-            unitPrice: product.unit_price,
-          });
+          setPendingProduct({ code: product.code, name: product.name, unitPrice: product.unit_price });
           lastLookupKeyRef.current = sanitized;
-          if (!selectedLine) {
-            window.requestAnimationFrame(() => {
-              quantityInputRef.current?.focus();
-            });
-          }
+          if (!selectedLine) window.requestAnimationFrame(() => quantityInputRef.current?.focus());
         } else {
           setPendingProduct(null);
           lastLookupKeyRef.current = null;
@@ -497,9 +449,7 @@ export default function POSClient() {
 
   useEffect(
     () => () => {
-      if (toastTimerRef.current) {
-        window.clearTimeout(toastTimerRef.current);
-      }
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     },
     [],
   );
@@ -507,6 +457,7 @@ export default function POSClient() {
   return (
     <>
       <ScriptlessBridge onScan={(code) => void handleScanDetected(code)} />
+
       <main className="mx-auto flex min-h-screen w-full max-w-[360px] flex-col gap-6 bg-[#f4f6fb] px-4 pb-28 pt-6 text-neutral-900">
         <header className="flex items-center justify-between rounded-2xl bg-white px-5 py-4 shadow-lg shadow-blue-100/40 ring-1 ring-white">
           <h1 className="text-lg font-semibold text-neutral-900">モバイルPOSレジ</h1>
@@ -575,9 +526,7 @@ export default function POSClient() {
                 const sanitized = sanitizeEAN13Input(event.target.value);
                 setManualCode(sanitized);
                 setSelectedCode(null);
-                if (sanitized.length < 13) {
-                  setPendingProduct(null);
-                }
+                if (sanitized.length < 13) setPendingProduct(null);
               }}
               placeholder="バーコード入力 / スキャン番号"
               className="w-full rounded-2xl border border-[#e3e8ff] bg-white px-4 py-3 text-sm text-neutral-800 shadow-inner shadow-blue-100/30 placeholder:text-neutral-400"
@@ -704,6 +653,7 @@ export default function POSClient() {
           </ul>
         </section>
       </main>
+
       <div className="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[360px] px-4 pb-4 pt-2" data-testid="footerbar">
         <div className="rounded-[28px] bg-white p-4 shadow-xl shadow-blue-100/40 ring-1 ring-white">
           <div className="text-xs text-neutral-400">うち税額</div>
@@ -732,18 +682,11 @@ export default function POSClient() {
 
       {isCheckoutOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
-          <div
-            role="dialog"
-            aria-modal="true"
-            className="w-full max-w-md rounded-3xl bg-white p-6 shadow-xl ring-1 ring-neutral-200"
-          >
+          <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-3xl bg-white p-6 shadow-xl ring-1 ring-neutral-200">
             <h2 className="text-base font-semibold text-neutral-900">お会計内容の確認</h2>
             <div className="mt-4 max-h-64 space-y-3 overflow-y-auto pr-1">
               {cart.map((line) => (
-                <div
-                  key={`checkout-${line.code}`}
-                  className="rounded-2xl bg-neutral-50 p-4 ring-1 ring-neutral-200"
-                >
+                <div key={`checkout-${line.code}`} className="rounded-2xl bg-neutral-50 p-4 ring-1 ring-neutral-200">
                   <div className="flex items-start justify-between text-xs text-neutral-600">
                     <div>
                       <p className="text-sm font-semibold text-neutral-900">{line.name}</p>

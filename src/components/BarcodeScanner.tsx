@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { BrowserMultiFormatReader, type IScannerControls } from '@zxing/browser';
 import { BarcodeFormat, DecodeHintType, NotFoundException } from '@zxing/library';
+import { getValidEAN13 } from '../lib/validators';
 
 type Props = {
   open: boolean;
@@ -13,14 +14,6 @@ type Props = {
 type ScannerStatus = 'initializing' | 'scanning' | 'detected' | 'error';
 
 const DEBUG = Boolean(process.env.NEXT_PUBLIC_DEBUG_SCAN);
-
-function isValidEAN13(code: string): boolean {
-  if (!/^\d{13}$/.test(code)) return false;
-  const digits = code.split('').map(Number);
-  const checkDigit = digits.pop()!;
-  const sum = digits.reduce((acc, d, i) => acc + d * (i % 2 === 0 ? 1 : 3), 0);
-  return (10 - (sum % 10)) % 10 === checkDigit;
-}
 
 export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
   // ✅ フックは常に先頭で宣言（条件分岐の外）
@@ -86,14 +79,14 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
 
             if (result) {
               const raw = result.getText();
-              const normalized = raw.replace(/\D/g, '');
-              if (DEBUG) console.log('[ZXing] raw:', raw, 'normalized:', normalized);
-              if (isValidEAN13(normalized)) {
+              const canonical = getValidEAN13(raw);
+              if (DEBUG) console.log('[ZXing] raw:', raw, 'canonical:', canonical);
+              if (canonical) {
                 setStatus('detected');
                 stopped = true;
                 try { controls?.stop(); } catch {}
                 try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
-                onDetected(normalized);
+                onDetected(canonical);
                 onClose();
               }
               return;

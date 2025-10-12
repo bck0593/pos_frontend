@@ -1,25 +1,20 @@
-// next.config.js
-/** @type {import('next').NextConfig} */
-const nextConfig = {
+// next.config.ts
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
   output: 'standalone',
-  reactStrictMode: true,
+  experimental: { typedRoutes: false },
   async rewrites() {
-    // ビルド時に読む（空なら何もしない）
-    const base =
-      process.env.NEXT_PUBLIC_API_BASE ||
-      process.env.NEXT_PUBLIC_API_BASE_URL ||
-      process.env.NEXT_PUBLIC_BACKEND_URL;
-
-    if (!base) return [];
-
-    // 例: /api/products/... -> https://...py-oshima29.azurewebsites.net/api/products/...
-    return [
-      {
-        source: '/api/:path*',
-        destination: `${base}/api/:path*`,
-      },
-    ];
+    if (process.env.NODE_ENV !== 'production') {
+      return [
+        {
+          source: '/api/:path*',
+          destination: 'http://127.0.0.1:8000/api/:path*',
+        },
+      ];
+    }
+    return [];
   },
 };
 
-module.exports = nextConfig;
+export default nextConfig;
