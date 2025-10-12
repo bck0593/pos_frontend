@@ -1,3 +1,4 @@
+// src/components/BarcodeScanner.tsx
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
@@ -9,14 +10,21 @@ type Props = {
   open: boolean;
   onClose: () => void;
   onDetected: (code: string) => void;
+  /** 検出後に自動で閉じるか（既定: false） */
+  autoCloseOnDetect?: boolean;
 };
 
 type ScannerStatus = 'initializing' | 'scanning' | 'detected' | 'error';
 
 const DEBUG = Boolean(process.env.NEXT_PUBLIC_DEBUG_SCAN);
 
-export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
-  // ✅ フックは常に先頭で宣言（条件分岐の外）
+export default function BarcodeScanner({
+  open,
+  onClose,
+  onDetected,
+  autoCloseOnDetect = false,
+}: Props) {
+  // ✅ フックは常に先頭で宣言
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -27,9 +35,10 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
   useEffect(() => {
     let stopped = false;
 
-    // open=false のときは何もしない（フック自体は呼ばれているので OK）
     if (!open) {
-      return () => { /* nothing */ };
+      return () => {
+        /* nothing */
+      };
     }
 
     (async () => {
@@ -46,7 +55,7 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
           audio: false,
         });
         if (stopped) {
-          stream.getTracks().forEach(t => t.stop());
+          stream.getTracks().forEach((t) => t.stop());
           return;
         }
         streamRef.current = stream;
@@ -70,29 +79,41 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         const reader = new BrowserMultiFormatReader(hints);
         setStatus('scanning');
 
-        // 型は (result, err, controls) の3引数
         const controls = await reader.decodeFromVideoDevice(
           undefined,
           video,
-          (result, err, controls) => {
+          (result, err, ctl) => {
             if (stopped) return;
 
             if (result) {
               const raw = result.getText();
               const canonical = getValidEAN13(raw);
               if (DEBUG) console.log('[ZXing] raw:', raw, 'canonical:', canonical);
+
               if (canonical) {
                 setStatus('detected');
                 stopped = true;
-                try { controls?.stop(); } catch {}
-                try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
+
+                // スキャン停止（ここでカメラも止める）
+                try {
+                  ctl?.stop();
+                } catch {}
+                try {
+                  streamRef.current?.getTracks().forEach((t) => t.stop());
+                } catch {}
+
+                // 親へ通知（親でモーダルを出す）
                 onDetected(canonical);
-                onClose();
+
+                // 自動で閉じたい場合だけ閉じる（既定は閉じない）
+                if (autoCloseOnDetect) {
+                  onClose();
+                }
               }
               return;
             }
 
-            // NotFound は「見つからなかっただけ」なので無視。他のエラーのみ表示
+            // NotFound は無視。他のエラーのみ表示
             if (err && !(err instanceof NotFoundException)) {
               if (DEBUG) console.warn('[ZXing] error:', err);
               setStatus('error');
@@ -111,21 +132,28 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
 
     return () => {
       stopped = true;
-      try { controlsRef.current?.stop(); } catch {}
-      try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
+      try {
+        controlsRef.current?.stop();
+      } catch {}
+      try {
+        streamRef.current?.getTracks().forEach((t) => t.stop());
+      } catch {}
       controlsRef.current = null;
       streamRef.current = null;
     };
-  }, [open, onClose, onDetected]);
+  }, [open, onClose, onDetected, autoCloseOnDetect]);
 
-  // ここで return null は OK（フック宣言はすでに実行済み）
+  // モーダル閉時は何も描画しない（フックは既に評価済み）
   if (!open) return null;
 
   const statusLabel =
-    status === 'initializing' ? 'カメラを準備しています…' :
-    status === 'detected'     ? '検出しました' :
-    status === 'error'        ? (error || 'スキャンに失敗しました') :
-                                'スキャン中…';
+    status === 'initializing'
+      ? 'カメラを準備しています…'
+      : status === 'detected'
+      ? '検出しました'
+      : status === 'error'
+      ? error || 'スキャンに失敗しました'
+      : 'スキャン中…';
 
   return (
     <div className="fixed inset-0 z-50">
