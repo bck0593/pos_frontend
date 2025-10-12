@@ -56,12 +56,48 @@ jobs:
 
       - name: Prepare artifact
         run: |
+          set -e
           rm -rf out && mkdir -p out/.next
+          # サーバ（standalone）一式
           cp -r .next/standalone/* out/
+          # 静的資産
           cp -r .next/static out/.next/static
+          # public があれば同梱
           if [ -d public ]; then cp -r public out/public; fi
-          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));pkg.scripts=pkg.scripts||{};pkg.scripts.start='node server.js';fs.writeFileSync('out/package.json',JSON.stringify(pkg,null,2));"
+
+          # ★ 最小の package.json を新規生成（prestart/postinstall 等を一切含めない）
+          node -e "const fs=require('fs');const pj={ \
+            name:'next-standalone', version:'0.0.0', private:true, \
+            type:'commonjs', main:'server.js', engines:{node:'>=18'}, \
+            scripts:{ start:'node server.js' } \
+          }; fs.writeFileSync('out/package.json', JSON.stringify(pj,null,2));"
+
+          # （Windowsでも動作）web.config を同梱（Linux では無視される）
+          cat > out/web.config << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <system.webServer>
+              <handlers>
+                <add name="iisnode" path="server.js" verb="*" modules="iisnode" />
+              </handlers>
+              <rewrite>
+                <rules>
+                  <rule name="DynamicContent" stopProcessing="true">
+                    <match url=".*" />
+                    <action type="Rewrite" url="server.js" />
+                  </rule>
+                </rules>
+              </rewrite>
+              <staticContent>
+                <remove fileExtension=".json" />
+                <mimeMap fileExtension=".json" mimeType="application/json" />
+              </staticContent>
+            </system.webServer>
+          </configuration>
+          EOF
+
           echo "=== out tree ==="; ls -la out
+          test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
 
       - name: Sleep (avoid SCM race)
         run: sleep 10
@@ -72,4 +108,4 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           package: ./out
-          clean: true   # ← 追加：展開先をクリーンにしてから配置
+          clean: true   # 展開先をクリーンにしてから配置
