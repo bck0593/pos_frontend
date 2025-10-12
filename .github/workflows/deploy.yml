@@ -18,15 +18,10 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # ---- Azure Web App name (Linux, Node 22 コンテナ) ----
       AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
-
-      # ---- Next.js/Build 環境 ----
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
       NEXT_DISABLE_ESLINT_PLUGIN: "true"
-
-      # ---- ビルド時に Rewrites の宛先を焼き込む ----
       NEXT_PUBLIC_BACKEND_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
       NEXT_PUBLIC_API_BASE: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
       NEXT_PUBLIC_API_BASE_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
@@ -59,54 +54,34 @@ jobs:
           set -e
           npm ci
           npm run build --no-lint
-
           echo "=== list .next ==="; ls -la .next || true
           echo "=== list .next/standalone ==="; ls -la .next/standalone || true
           echo "=== list .next/static ==="; ls -la .next/static || true
-
-          # 宛先URLの埋め込みを確認（失敗にはしない）
-          echo "=== preview routes-manifest.json (if exists) ==="
+          echo "=== preview routes-manifest (if exists) ==="
           cat .next/routes-manifest.json 2>/dev/null || true
-          echo "=== search backend url in .next (non-fatal) ==="
-          grep -R "app-002-gen10-step3-1-py-oshima29" -n .next || true
 
       - name: Prepare artifact (standalone runtime)
         run: |
           set -e
           rm -rf out && mkdir -p out/.next
-
-          # ---- サーバ（standalone）一式 ----
+          # server (standalone)
           cp -r .next/standalone/* out/
-
-          # ---- 静的資産（必須）----
-          mkdir -p out/.next
+          # static
           cp -r .next/static out/.next/static
-
-          # ---- ルートのマニフェストJSON（必須）----
-          # 例：routes-manifest.json, build-manifest.json, prerender-manifest.json,
-          #     react-loadable-manifest.json, middleware-manifest.json など
-          cp .next/*.json out/.next/ || true
-
-          # ---- server 側マニフェストも（安全策）----
+          # root manifests (routes/build/prerender etc.)
+          cp .next/*.json out/.next/ 2>/dev/null || true
+          # server-side manifests (safety)
           if [ -d .next/server ]; then
             mkdir -p out/.next/server
             cp -r .next/server/*.json out/.next/server/ 2>/dev/null || true
           fi
-
-          # ---- BUILD_ID（必須）----
+          # BUILD_ID
           cp .next/BUILD_ID out/.next/BUILD_ID
-
-          # ---- public（あれば）----
+          # public
           if [ -d public ]; then cp -r public out/public; fi
-
-          # ---- 最小 package.json（ランタイム用）----
-          node -e "const fs=require('fs');const pj={ \
-            name:'next-standalone', version:'0.0.0', private:true, \
-            type:'commonjs', main:'server.js', engines:{node:'>=18'}, \
-            scripts:{ start:'node server.js' } \
-          }; fs.writeFileSync('out/package.json', JSON.stringify(pj,null,2));"
-
-          # ---- Windows/IIS 向け web.config（Linux では無視）----
+          # minimal runtime package.json
+          node -e "const fs=require('fs');const pj={name:'next-standalone',version:'0.0.0',private:true,type:'commonjs',main:'server.js',engines:{node:'>=18'},scripts:{start:'node server.js'}};fs.writeFileSync('out/package.json',JSON.stringify(pj,null,2));"
+          # web.config (ignored on Linux)
           cat > out/web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
@@ -129,11 +104,7 @@ jobs:
             </system.webServer>
           </configuration>
           EOF
-
-          echo "=== out tree (top) ==="; ls -la out
-          echo "=== out/.next ==="; ls -la out/.next
-          echo "=== out/.next/server (if any) ==="; ls -la out/.next/server 2>/dev/null || true
-
+          echo "=== out tree ==="; ls -la out; echo "=== out/.next ==="; ls -la out/.next
           test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
           test -f out/.next/BUILD_ID || (echo '::error ::BUILD_ID missing in out/.next/' && exit 1)
           test -f out/.next/routes-manifest.json || (echo '::error ::routes-manifest.json missing in out/.next/' && exit 1)
