@@ -1,5 +1,4 @@
 ﻿import type { NextRequest } from "next/server";
-
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
@@ -43,18 +42,15 @@ async function handle(req: NextRequest, segs: string[] = []) {
       status: 502, headers: { "content-type": "application/json" }
     });
   }
-
   const joined = segs.join("/");
   const qs = req.nextUrl.search || "";
   const candidates = [
-    `${base}/api/${joined}${qs}`, // まず /api/* を試す
-    `${base}/${joined}${qs}`,     // 404 の時だけ /:* にフォールバック
+    `${base}/api/${joined}${qs}`,
+    `${base}/${joined}${qs}`,
   ];
-
   try {
     let res = await forward(candidates[0], req);
     if (res.status === 404) res = await forward(candidates[1], req);
-
     const buf = await res.arrayBuffer();
     const headers = new Headers(res.headers);
     headers.delete("content-encoding");
