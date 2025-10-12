@@ -1,176 +1,181 @@
-// src/components/BarcodeScanner.tsx
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BrowserMultiFormatReader, IScannerControls } from '@zxing/browser';
-import { BarcodeFormat, DecodeHintType } from '@zxing/library';
+import { useEffect, useRef, useState } from 'react';
+import { BarcodeFormat, BrowserMultiFormatReader, DecodeHintType, IScannerControls } from '@zxing/browser';
+import { ChecksumException, FormatException, NotFoundException } from '@zxing/library';
 
-export type BarcodeScannerProps = {
-  /** モーダルを開く/閉じる */
+type Props = {
   open: boolean;
-  /** モーダルを閉じるハンドラ */
   onClose: () => void;
-  /** 検出時のコールバック（JANコード等） */
   onDetected: (code: string) => void;
-  /** 1回のスキャン試行のタイムアウト(ms) */
-  timeoutMs?: number; // default 10_000
 };
 
-const DETECT_COOLDOWN_MS = 700;
+const DETECTED_COOLDOWN_MS = 700;
 
-export default function BarcodeScanner({
-  open,
-  onClose,
-  onDetected,
-  timeoutMs = 10_000,
-}: BarcodeScannerProps) {
+function isValidEAN13(value: string): boolean {
+  if (!/^\d{13}$/.test(value)) return false;
+  const digits = value.split('').map(Number);
+  const checkDigit = digits.pop()!;
+  const weighted = digits.reduce((sum, digit, index) => sum + digit * (index % 2 === 0 ? 1 : 3), 0);
+  return (10 - (weighted % 10)) % 10 === checkDigit;
+}
+
+export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // ZXing ヒント（EAN-13/EAN-8 のみ）
-  const hints = useMemo(() => {
-    const m = new Map<DecodeHintType, unknown>();
-    m.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8]);
-    return m;
-  }, []);
-
-  const stopAll = useCallback(() => {
-    try {
-      controlsRef.current?.stop();
-    } catch {}
-    controlsRef.current = null;
-
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-
-    const v = videoRef.current;
-    if (v?.srcObject instanceof MediaStream) {
-      (v.srcObject as MediaStream).getTracks().forEach((t) => t.stop());
-      v.srcObject = null;
-    }
-  }, []);
+  const streamRef = useRef<MediaStream | null>(null);
+  const lastDetectedRef = useRef<number>(0);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) {
-      stopAll();
-      setBusy(false);
-      setError(null);
-      return;
+      return () => {
+        /* noop */
+      };
     }
 
     let cancelled = false;
-    (async () => {
-      setBusy(true);
-      setError(null);
+    let starting = false;
 
-      // 1) iOS 対策: enumerateDevices が空にならないように軽く getUserMedia
+    const hints = new Map<DecodeHintType, BarcodeFormat[]>();
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13]);
+    const reader = new BrowserMultiFormatReader(hints);
+
+    async function pickBackCamera(): Promise<MediaDeviceInfo | null> {
       try {
-        const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        s.getTracks().forEach((t) => t.stop());
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videos = devices.filter((device) => device.kind === 'videoinput');
+        const back = videos.find((device) => /back|rear|environment/i.test(device.label));
+        return back ?? videos[0] ?? null;
       } catch {
-        /* ignore – 後続で再試行 */
+        return null;
       }
+    }
 
-      const reader = new BrowserMultiFormatReader(hints, {
-        delayBetweenScanAttempts: DETECT_COOLDOWN_MS,
-      });
+    async function startScanning(): Promise<void> {
+      if (starting || cancelled) return;
+      const video = videoRef.current;
+      if (!video) return;
 
-      // 背面カメラを優先して選ぶ
-      async function pickBackCameraId(): Promise<string | undefined> {
-        try {
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          const videos = devices.filter((d) => d.kind === 'videoinput');
-          const back = videos.find((d) => /back|rear|environment|後面|背面/i.test(d.label));
-          return (back ?? videos[0])?.deviceId;
-        } catch {
-          return undefined;
-        }
-      }
-
-      async function startDecode() {
-        const v = videoRef.current!;
-        v.setAttribute('playsinline', 'true');
-        v.muted = true;
-
-        // まず facingMode で試す（iOS 16+ で安定）
-        try {
-          const res = await reader.decodeOnceFromConstraints(
-            { audio: false, video: { facingMode: { exact: 'environment' } } },
-            v,
-          );
-          return res;
-        } catch {
-          // ダメなら deviceId 指定で再挑戦
-          const deviceId = await pickBackCameraId();
-          const res = await reader.decodeOnceFromVideoDevice(deviceId, v);
-          return res;
-        }
-      }
-
-      // タイムアウト
-      const timeoutP = new Promise<never>((_, rej) => {
-        timeoutRef.current = setTimeout(() => rej(new Error('timeout')), timeoutMs);
-      });
+      starting = true;
+      setErrorMessage(null);
 
       try {
-        const result = (await Promise.race([startDecode(), timeoutP])) as any;
-        if (!cancelled && result) {
-          if (navigator.vibrate) navigator.vibrate(50);
-          const text: string =
-            typeof result?.getText === 'function' ? result.getText() : result?.text ?? '';
-          onDetected(text);
-          // 1ヒットで自動クローズしたい場合は下を有効化
-          // onClose();
-        }
-      } catch (e: any) {
-        if (!cancelled) {
-          setError(e?.message ?? String(e));
-        }
-      } finally {
-        if (!cancelled) {
-          controlsRef.current = reader as unknown as IScannerControls;
-          setBusy(false);
-        } else {
+        // Prime camera permissions so device labels are populated (required on iOS).
+        if (!streamRef.current) {
           try {
-            reader.stop();
-          } catch {}
+            const permissionProbe = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            permissionProbe.getTracks().forEach((track) => track.stop());
+          } catch {
+            /* ignore; actual call below will surface the error */
+          }
         }
+
+        const backCamera = await pickBackCamera();
+        const constraints: MediaStreamConstraints = {
+          video: backCamera
+            ? { deviceId: { exact: backCamera.deviceId } }
+            : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false,
+        };
+
+        const stream = streamRef.current ?? (await navigator.mediaDevices.getUserMedia(constraints));
+        streamRef.current = stream;
+
+        video.srcObject = stream;
+        await video.play();
+
+        controlsRef.current = await reader.decodeFromVideoDevice(undefined, video, (result, error) => {
+          if (cancelled) return;
+
+          if (result) {
+            const now = Date.now();
+            if (now - lastDetectedRef.current < DETECTED_COOLDOWN_MS) return;
+
+            const digitsOnly = result.getText().replace(/\D/g, '');
+            if (!isValidEAN13(digitsOnly)) return;
+
+            lastDetectedRef.current = now;
+            onDetected(digitsOnly);
+            return;
+          }
+
+          if (
+            error &&
+            !(error instanceof NotFoundException) &&
+            !(error instanceof ChecksumException) &&
+            !(error instanceof FormatException)
+          ) {
+            // Unexpected ZXing error - surface for debugging purposes only.
+            console.debug('[BarcodeScanner] decode error', error);
+          }
+        });
+      } catch (error) {
+        const message =
+          error && typeof error === 'object' && 'name' in error && error.name === 'NotAllowedError'
+            ? 'カメラ使用が許可されていません。ブラウザの設定を確認してください。'
+            : 'カメラの起動に失敗しました。HTTPSアクセスとカメラ権限を確認してください。';
+        setErrorMessage(message);
+      } finally {
+        starting = false;
       }
-    })();
+    }
+
+    void startScanning();
+
+    const handleVisibility = () => {
+      if (document.hidden) {
+        controlsRef.current?.stop();
+        controlsRef.current = null;
+        reader.reset();
+      } else if (!controlsRef.current) {
+        void startScanning();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
       cancelled = true;
-      stopAll();
-    };
-  }, [open, hints, onDetected, timeoutMs, stopAll]);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      controlsRef.current?.stop();
+      controlsRef.current = null;
+      reader.reset();
+      const stream = streamRef.current;
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
 
-  // Escで閉じる
+      const video = videoRef.current;
+      if (video) {
+        video.srcObject = null;
+      }
+    };
+  }, [open, onDetected]);
+
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+
+    window.addEventListener('keydown', handleKeydown);
+    return () => window.removeEventListener('keydown', handleKeydown);
   }, [open, onClose]);
 
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="w-[min(92vw,520px)] rounded-xl bg-white p-4 shadow-xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+      <div className="w-[92%] max-w-md rounded-2xl bg-white p-4 shadow-xl">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-lg font-semibold">バーコードスキャン</h2>
+          <h2 className="text-base font-semibold text-neutral-900">バーコードスキャン</h2>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md border px-2 py-1 text-sm hover:bg-gray-50"
+            className="rounded-md border border-neutral-300 px-3 py-1 text-sm text-neutral-600 hover:bg-neutral-100"
           >
             閉じる
           </button>
@@ -178,21 +183,18 @@ export default function BarcodeScanner({
 
         <video
           ref={videoRef}
-          className="aspect-[3/4] w-full rounded-md bg-black"
+          className="aspect-[3/4] w-full rounded-xl bg-black"
           autoPlay
           playsInline
           muted
         />
 
-        {busy && <p className="mt-2 text-sm text-gray-500">カメラ起動中…</p>}
-        {error && (
-          <p className="mt-2 text-sm text-red-600">
-            スキャン失敗: {error === 'timeout' ? 'タイムアウトしました。' : error}
+        {errorMessage && <p className="mt-3 text-sm text-red-600">{errorMessage}</p>}
+        {!errorMessage && (
+          <p className="mt-3 text-xs text-neutral-500">
+            読み取りに時間がかかる場合はバーコードを中央に合わせ、距離や角度を調整してください。
           </p>
         )}
-        <p className="mt-1 text-xs text-gray-400">
-          うまく読めない時はバーコードをカメラの中央に置き、距離を前後に調整してください。
-        </p>
       </div>
     </div>
   );
