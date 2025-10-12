@@ -15,6 +15,8 @@ jobs:
     env:
       AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
       NEXT_TELEMETRY_DISABLED: "1"
+      # ESLint プラグインが無くても落ちないように
+      NEXT_DISABLE_ESLINT_PLUGIN: "true"
 
     steps:
       - name: Checkout
@@ -25,6 +27,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
+          # ルート直下の lock をキャッシュ
           cache-dependency-path: |
             package-lock.json
             npm-shrinkwrap.json
@@ -32,8 +35,11 @@ jobs:
       - name: Install deps & build (Next standalone)
         run: |
           npm ci
+          # Lint をスキップ（型は next.config で無視していない限りチェックされます）
           npm run build --no-lint
+          echo "=== list .next ==="
           ls -la .next || true
+          echo "=== list .next/standalone ==="
           ls -la .next/standalone || true
 
       - name: Prepare artifact
@@ -42,13 +48,18 @@ jobs:
             echo "::error ::.next/standalone not found. Ensure next.config.* has: module.exports = { output: 'standalone' }"
             exit 1
           fi
+
           rm -rf out && mkdir -p out/.next
+          # .next/standalone には server.js と必要な node_modules が入る
           cp -r .next/standalone/* out/
+          # 静的ファイル
           cp -r .next/static out/.next/static
+          # public があれば同梱
           if [ -d public ]; then cp -r public out/public; fi
+          # start スクリプトを明示
           node -e "let p=require('./package.json');p.scripts=p.scripts||{};p.scripts.start='node server.js';require('fs').writeFileSync('out/package.json',JSON.stringify(p,null,2))"
 
-          # --- Windows App Service 用の web.config を生成（iisnode で server.js を起動）---
+          # --- Windows App Service 用 web.config（iisnode -> server.js） ---
           cat > out/web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
@@ -58,14 +69,12 @@ jobs:
               </handlers>
               <rewrite>
                 <rules>
-                  <!-- すべてのリクエストを Next の server.js に渡す -->
                   <rule name="DynamicContent" stopProcessing="true">
                     <match url=".*" />
                     <action type="Rewrite" url="server.js" />
                   </rule>
                 </rules>
               </rewrite>
-              <!-- 静的ファイル優先（必要に応じて） -->
               <staticContent>
                 <remove fileExtension=".json" />
                 <mimeMap fileExtension=".json" mimeType="application/json" />
@@ -88,4 +97,4 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           package: out
-          # Windows + publish-profile では startup-command は使用不可。削除！
+          # Windows + publish-profile では startup-command は使えないので未指定
