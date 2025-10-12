@@ -6,19 +6,24 @@ on:
     branches: [ "main" ]
     paths:
       - ".github/workflows/deploy.yml"
-      - "**/*"
+      - "frontend/**"
   workflow_dispatch:
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
-    # 👇 ここでビルド時に埋め込む環境変数を定義（重要）
+    # すべて frontend/ で実行（これが超重要）
+    defaults:
+      run:
+        working-directory: frontend
+
     env:
       AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
       NEXT_TELEMETRY_DISABLED: "1"
       NEXT_DISABLE_ESLINT_PLUGIN: "true"
-      # ===== バックエンド（FastAPI）のベースURLを“ビルド時”に注入 =====
+
+      # ===== ビルド時にクライアントへ埋め込む =====
       NEXT_PUBLIC_BACKEND_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
       NEXT_PUBLIC_API_BASE: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
       NEXT_PUBLIC_API_BASE_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
@@ -30,88 +35,41 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
-          cache-dependency-path: |
-            package-lock.json
-            npm-shrinkwrap.json
+          cache-dependency-path: frontend/package-lock.json
 
-      - name: Show env for debug (masked in logs)
+      - name: Ensure Next standalone output is enabled
         run: |
-          echo "AZURE_WEBAPP_NAME=$AZURE_WEBAPP_NAME"
-          echo "NEXT_PUBLIC_API_BASE=$NEXT_PUBLIC_API_BASE"
+          node -e "const fs=require('fs');const p='./next.config.js';let t=fs.existsSync(p)?fs.readFileSync(p,'utf8'):'module.exports={};';if(!/output:\s*['\"]standalone['\"]/.test(t)){t=t.replace(/module\.exports\s*=\s*{?/, m=>m.includes('{')?m:m+'{') ; t=t.replace(/}\s*;?\s*$/, ', output:\"standalone\" }'); fs.writeFileSync(p,t); console.log('patched next.config.js to enable standalone');} else {console.log('standalone already enabled');}"
 
-      - name: Ensure API_BASE is set (fail fast if empty)
-        run: |
-          if [ -z "${NEXT_PUBLIC_API_BASE}${NEXT_PUBLIC_API_BASE_URL}${NEXT_PUBLIC_BACKEND_URL}" ]; then
-            echo "::error ::API base URL is empty at build time."
-            exit 1
-          fi
-
-      - name: Install deps & build (Next standalone)
+      - name: Install & Build
         run: |
           npm ci
           npm run build --no-lint
-          echo "=== list .next ==="
-          ls -la .next || true
-          echo "=== list .next/standalone ==="
-          ls -la .next/standalone || true
-          echo "=== sanity check: compiled files should contain 'py-oshima29' ==="
-          (grep -R "app-002-gen10-step3-1-py-oshima29" -n .next && echo "OK") || (echo "::error ::Backend URL not found in compiled bundle"; exit 1)
+          echo "=== list .next ==="; ls -la .next || true
+          echo "=== list .next/standalone ==="; ls -la .next/standalone || true
+          echo "=== sanity check: backend URL embedded ==="
+          (grep -R "app-002-gen10-step3-1-py-oshima29" -n .next || (echo "::error ::Backend URL not found in client bundle"; exit 1))
 
       - name: Prepare artifact
         run: |
-          if [ ! -d ".next/standalone" ]; then
-            echo "::error ::.next/standalone not found. Ensure next.config.* has: module.exports = { output: 'standalone' }"
-            exit 1
-          fi
-
-          rm -rf out && mkdir -p out/.next
-          # .next/standalone には server.js と必要な node_modules が入る
-          cp -r .next/standalone/* out/
-          # 静的ファイル
-          cp -r .next/static out/.next/static
+          rm -rf ../out && mkdir -p ../out/.next
+          # サーバ（standalone）一式
+          cp -r .next/standalone/* ../out/
+          # 静的資産
+          cp -r .next/static ../out/.next/static
           # public があれば同梱
-          if [ -d public ]; then cp -r public out/public; fi
+          if [ -d public ]; then cp -r public ../out/public; fi
+          # 起動スクリプト（Azure Linux は npm start を探す）
+          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));pkg.scripts=pkg.scripts||{};pkg.scripts.start='node server.js';fs.writeFileSync('../out/package.json',JSON.stringify(pkg,null,2));"
 
-          # start スクリプトを明示（Linux App Serviceで npm start を拾わせる想定）
-          node -e "let p=require('./package.json');p.scripts=p.scripts||{};p.scripts.start='node server.js';require('fs').writeFileSync('out/package.json',JSON.stringify(p,null,2))"
+      - name: Sleep (avoid SCM race)
+        run: sleep 10
 
-          # Windows App Service 用の web.config（Linux では無視されるが同梱しても無害）
-          cat > out/web.config << 'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <configuration>
-            <system.webServer>
-              <handlers>
-                <add name="iisnode" path="server.js" verb="*" modules="iisnode" />
-              </handlers>
-              <rewrite>
-                <rules>
-                  <rule name="DynamicContent" stopProcessing="true">
-                    <match url=".*" />
-                    <action type="Rewrite" url="server.js" />
-                  </rule>
-                </rules>
-              </rewrite>
-              <staticContent>
-                <remove fileExtension=".json" />
-                <mimeMap fileExtension=".json" mimeType="application/json" />
-              </staticContent>
-            </system.webServer>
-          </configuration>
-          EOF
-
-          echo "=== out tree ==="
-          ls -la out
-          test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
-          test -f out/web.config || (echo '::error ::web.config missing in out/' && exit 1)
-
-      - name: Wait a bit (avoid SCM restart race)
-        run: sleep 20
-
-      - name: Deploy to Azure Web App (artifact only)
+      - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: out
+          package: ./out
