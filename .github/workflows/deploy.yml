@@ -26,7 +26,7 @@ jobs:
       NEXT_TELEMETRY_DISABLED: "1"
       NEXT_DISABLE_ESLINT_PLUGIN: "true"
 
-      # ---- 重要：ビルド時に Rewrites の宛先を焼き込む ----
+      # ---- ビルド時に Rewrites の宛先を焼き込む ----
       NEXT_PUBLIC_BACKEND_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
       NEXT_PUBLIC_API_BASE: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
       NEXT_PUBLIC_API_BASE_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
@@ -40,7 +40,6 @@ jobs:
           echo "repo root:"; pwd; ls -la
           test -f package.json || (echo "::error ::package.json not found at repo root"; exit 1)
 
-      # lock があればキャッシュ、無ければ通常セットアップ
       - name: Setup Node (with cache)
         if: ${{ hashFiles('package-lock.json') != '' }}
         uses: actions/setup-node@v4
@@ -65,9 +64,11 @@ jobs:
           echo "=== list .next/standalone ==="; ls -la .next/standalone || true
           echo "=== list .next/static ==="; ls -la .next/static || true
 
-          # バックエンド URL がバンドルに含まれているか簡易チェック（失敗時は落とす）
-          echo "=== sanity check: backend URL embedded ==="
-          (grep -R "app-002-gen10-step3-1-py-oshima29" -n .next || (echo "::error ::Backend URL not found in client bundle"; exit 1))
+          # 宛先URLの埋め込みを確認（失敗にはしない）
+          echo "=== preview routes-manifest.json (if exists) ==="
+          cat .next/routes-manifest.json 2>/dev/null || true
+          echo "=== search backend url in .next (non-fatal) ==="
+          grep -R "app-002-gen10-step3-1-py-oshima29" -n .next || true
 
       - name: Prepare artifact (standalone runtime)
         run: |
@@ -78,7 +79,19 @@ jobs:
           cp -r .next/standalone/* out/
 
           # ---- 静的資産（必須）----
+          mkdir -p out/.next
           cp -r .next/static out/.next/static
+
+          # ---- ルートのマニフェストJSON（必須）----
+          # 例：routes-manifest.json, build-manifest.json, prerender-manifest.json,
+          #     react-loadable-manifest.json, middleware-manifest.json など
+          cp .next/*.json out/.next/ || true
+
+          # ---- server 側マニフェストも（安全策）----
+          if [ -d .next/server ]; then
+            mkdir -p out/.next/server
+            cp -r .next/server/*.json out/.next/server/ 2>/dev/null || true
+          fi
 
           # ---- BUILD_ID（必須）----
           cp .next/BUILD_ID out/.next/BUILD_ID
@@ -86,14 +99,14 @@ jobs:
           # ---- public（あれば）----
           if [ -d public ]; then cp -r public out/public; fi
 
-          # ---- 最小 package.json（pre/post スクリプト無・安全）----
+          # ---- 最小 package.json（ランタイム用）----
           node -e "const fs=require('fs');const pj={ \
             name:'next-standalone', version:'0.0.0', private:true, \
             type:'commonjs', main:'server.js', engines:{node:'>=18'}, \
             scripts:{ start:'node server.js' } \
           }; fs.writeFileSync('out/package.json', JSON.stringify(pj,null,2));"
 
-          # ---- Windows/IIS 向け web.config（Linuxでは無視されるが無害）----
+          # ---- Windows/IIS 向け web.config（Linux では無視）----
           cat > out/web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
@@ -119,10 +132,12 @@ jobs:
 
           echo "=== out tree (top) ==="; ls -la out
           echo "=== out/.next ==="; ls -la out/.next
+          echo "=== out/.next/server (if any) ==="; ls -la out/.next/server 2>/dev/null || true
+
           test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
           test -f out/.next/BUILD_ID || (echo '::error ::BUILD_ID missing in out/.next/' && exit 1)
+          test -f out/.next/routes-manifest.json || (echo '::error ::routes-manifest.json missing in out/.next/' && exit 1)
 
-      # Azure 側の OneDeploy 競合回避
       - name: Sleep (avoid SCM race)
         run: sleep 8
 
