@@ -6,17 +6,12 @@ on:
     branches: [ "main" ]
     paths:
       - ".github/workflows/deploy.yml"
-      - "frontend/**"
+      - "**/*"
   workflow_dispatch:
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-
-    # すべて frontend/ で実行（setup-node の cache-dependency-path は例外でリポジトリルート基準）
-    defaults:
-      run:
-        working-directory: frontend
 
     env:
       AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
@@ -32,30 +27,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ロックファイルの存在をログで確認
-      - name: Sanity check lockfile (repo root + frontend/)
+      # ルートで存在確認
+      - name: Sanity check repo root
         run: |
           echo "repo root:"; pwd; ls -la
-          echo "frontend dir:"; ls -la .
+          test -f package.json || (echo "::error ::package.json not found at repo root"; exit 1)
 
-      # lock がある場合 → キャッシュ有効
+      # lockfile があればキャッシュ、無ければ通常セットアップ
       - name: Setup Node (with cache)
-        if: ${{ hashFiles('frontend/package-lock.json') != '' }}
+        if: ${{ hashFiles('package-lock.json') != '' }}
         uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: "npm"
-          # 注意：setup-node のパス解決は repo ルート基準。defaults.run は影響しない。
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: package-lock.json
 
-      # lock が無い場合 → キャッシュ無しで続行（エラー回避）
       - name: Setup Node (no cache fallback)
-        if: ${{ hashFiles('frontend/package-lock.json') == '' }}
+        if: ${{ hashFiles('package-lock.json') == '' }}
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      # Next の standalone 出力を強制（なければ追記）
+      # Next の standalone 出力を強制（無ければ追記）
       - name: Ensure Next standalone output is enabled
         run: |
           node -e "const fs=require('fs');const p='./next.config.js';let t=fs.existsSync(p)?fs.readFileSync(p,'utf8'):'module.exports = {}';if(!/output:\s*['\"]standalone['\"]/.test(t)){t=t.replace(/module\.exports\s*=\s*{?/, m=>m.includes('{')?m:m+'{');t=t.replace(/}\s*;?\s*$/, ', output:\"standalone\" }');fs.writeFileSync(p,t);console.log('patched next.config.js to enable standalone');}else{console.log('standalone already enabled');}"
@@ -71,16 +64,16 @@ jobs:
 
       - name: Prepare artifact
         run: |
-          rm -rf ../out && mkdir -p ../out/.next
+          rm -rf out && mkdir -p out/.next
           # サーバ（standalone）一式
-          cp -r .next/standalone/* ../out/
+          cp -r .next/standalone/* out/
           # 静的資産
-          cp -r .next/static ../out/.next/static
+          cp -r .next/static out/.next/static
           # public があれば同梱
-          if [ -d public ]; then cp -r public ../out/public; fi
+          if [ -d public ]; then cp -r public out/public; fi
           # 起動スクリプト（Azure Linux は npm start を探す）
-          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));pkg.scripts=pkg.scripts||{};pkg.scripts.start='node server.js';fs.writeFileSync('../out/package.json',JSON.stringify(pkg,null,2));"
-          echo "=== out tree ==="; ls -la ../out
+          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));pkg.scripts=pkg.scripts||{};pkg.scripts.start='node server.js';fs.writeFileSync('out/package.json',JSON.stringify(pkg,null,2));"
+          echo "=== out tree ==="; ls -la out
 
       - name: Sleep (avoid SCM race)
         run: sleep 10
