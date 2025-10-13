@@ -6,6 +6,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 const BarcodeScanner = dynamic(() => import('../components/BarcodeScanner'), { ssr: false });
 
+// ✅ 追加：スキャン成功モーダル（数量±付き）
+import AddToCartSuccessModal from '@/components/AddToCartSuccessModal';
+
 import {
   fetchProductByCode,
   submitPurchase,
@@ -19,35 +22,38 @@ import {
   sanitizeEAN13Input,
 } from '../lib/validators';
 
-type ItemMaster = {
+// ===== 型 =====
+export type ItemMaster = {
   code: string;
   name: string;
   unitPrice: number;
 };
 
-type CartLine = ItemMaster & {
+export type CartLine = ItemMaster & {
   quantity: number;
 };
 
-type ErrorChip = {
+export type ErrorChip = {
   id: string;
   message: string;
   actionLabel?: string;
   onAction?: () => void;
 };
 
-type Totals = {
+export type Totals = {
   taxOut: number;
   tax: number;
   taxIn: number;
 };
 
+// ===== 定数 =====
 const TAX_PERCENT = 10;
 const TAX_RATE = TAX_PERCENT / 100;
 const MIN_QUANTITY = 1;
 const MAX_QUANTITY = 999;
 const SCAN_DUPLICATE_GUARD_MS = 1200;
 
+// ===== Util =====
 function clampQuantity(value: number): number {
   if (!Number.isFinite(value)) return MIN_QUANTITY;
   const truncated = Math.trunc(value);
@@ -65,6 +71,7 @@ function calculateTotals(cart: CartLine[]): Totals {
   return { taxOut, tax, taxIn };
 }
 
+// ===== window ブリッジ（任意） =====
 declare global {
   interface Window {
     POSLv3_onScan?: (code: string) => void;
@@ -75,31 +82,34 @@ function ScriptlessBridge({ onScan }: { onScan: (code: string) => void }) {
   useEffect(() => {
     window.POSLv3_onScan = onScan;
     return () => {
-      if (window.POSLv3_onScan === onScan) {
-        delete window.POSLv3_onScan;
-      }
+      if (window.POSLv3_onScan === onScan) delete window.POSLv3_onScan;
     };
   }, [onScan]);
   return null;
 }
 
-type AddProductOptions = {
-  updateManualFields?: boolean;
-  focusQuantityOnInsert?: boolean;
-};
-
+// ===== メイン =====
 export default function POSClient() {
+  // カート & 入力系
   const [cart, setCart] = useState<CartLine[]>([]);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [manualCode, setManualCode] = useState('');
   const [pendingProduct, setPendingProduct] = useState<ItemMaster | null>(null);
   const [pendingQuantity, setPendingQuantity] = useState(1);
+
+  // UI 状態
   const [errors, setErrors] = useState<ErrorChip[]>([]);
   const [toastMessage, setToastMessage] = useState('');
   const [isScannerOpen, setScannerOpen] = useState(false);
   const [isCheckoutOpen, setCheckoutOpen] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
 
+  // ✅ 追加：スキャン成功モーダルの状態
+  const [isSuccessOpen, setSuccessOpen] = useState(false);
+  const [successItem, setSuccessItem] = useState<ItemMaster | null>(null);
+  const [successQty, setSuccessQty] = useState<number>(1);
+
+  // Ref
   const lastLookupKeyRef = useRef<string | null>(null);
   const lastInvalidCodeRef = useRef<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -113,6 +123,7 @@ export default function POSClient() {
     [cart, selectedCode],
   );
 
+  // ===== 共通関数 =====
   const resetManualFields = useCallback(() => {
     setManualCode('');
     setPendingProduct(null);
@@ -160,7 +171,7 @@ export default function POSClient() {
   );
 
   const addOrIncrementProduct = useCallback(
-    (product: ItemMaster, quantity: number, options: AddProductOptions = {}) => {
+    (product: ItemMaster, quantity: number, options: { updateManualFields?: boolean; focusQuantityOnInsert?: boolean } = {}) => {
       if (quantity <= 0) {
         showToast('数量は1点以上で入力してください。');
         return;
@@ -340,6 +351,13 @@ export default function POSClient() {
     }
   }, [cart, pushError, resetManualFields, showToast]);
 
+  // ===== スキャン処理 =====
+  const openSuccessModal = useCallback((item: ItemMaster) => {
+    setSuccessItem(item);
+    setSuccessQty(1);
+    setSuccessOpen(true);
+  }, []);
+
   const handleScanDetected = useCallback(
     async (rawCode: string) => {
       const normalizedInput = normalizeEAN13(rawCode);
@@ -359,7 +377,7 @@ export default function POSClient() {
         lastScanRef.current.code === validCode &&
         now - lastScanRef.current.timestamp < SCAN_DUPLICATE_GUARD_MS
       ) {
-        return;
+        return; // 二重読み取り防止
       }
       lastScanRef.current = { code: validCode, timestamp: now };
 
@@ -369,11 +387,8 @@ export default function POSClient() {
           pushError(`コード ${validCode} は登録されていません。`);
           return;
         }
-        addOrIncrementProduct(
-          { code: product.code, name: product.name, unitPrice: product.unit_price },
-          1,
-          { updateManualFields: false, focusQuantityOnInsert: false },
-        );
+        // ✅ ここで即カート追加せずモーダルを開く
+        openSuccessModal({ code: product.code, name: product.name, unitPrice: product.unit_price });
       } catch {
         pushError('バーコードの読み込みに失敗しました。', {
           label: '再スキャン',
@@ -381,9 +396,10 @@ export default function POSClient() {
         });
       }
     },
-    [addOrIncrementProduct, pushError],
+    [openSuccessModal, pushError],
   );
 
+  // ===== 手入力コード監視（既存維持） =====
   useEffect(() => {
     const sanitized = sanitizeEAN13Input(manualCode);
     if (sanitized !== manualCode) {
@@ -456,6 +472,7 @@ export default function POSClient() {
     [],
   );
 
+  // ===== JSX =====
   return (
     <>
       <ScriptlessBridge onScan={(code) => void handleScanDetected(code)} />
@@ -549,7 +566,7 @@ export default function POSClient() {
               <div className="flex items-center justify-between rounded-2xl border border-[#e3e8ff] bg-white px-3 py-2 shadow-inner shadow-blue-100/30">
                 <button
                   type="button"
-                  onClick={() => adjustQuantity(-1)}
+                  onClick={() => setPendingQuantity((q) => clampQuantity(q - 1))}
                   className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#eef2ff] text-lg font-semibold text-neutral-700 transition hover:bg-[#dde4ff]"
                   aria-label="数量を1減らす"
                 >
@@ -567,7 +584,7 @@ export default function POSClient() {
                 />
                 <button
                   type="button"
-                  onClick={() => adjustQuantity(1)}
+                  onClick={() => setPendingQuantity((q) => clampQuantity(q + 1))}
                   className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#eef2ff] text-lg font-semibold text-neutral-700 transition hover:bg-[#dde4ff]"
                   aria-label="数量を1増やす"
                 >
@@ -676,12 +693,41 @@ export default function POSClient() {
         </div>
       </div>
 
+      {/* カメラ・スキャナ */}
       <BarcodeScanner
         open={isScannerOpen}
         onClose={() => setScannerOpen(false)}
         onDetected={(code) => void handleScanDetected(code)}
       />
 
+      {/* ✅ スキャン成功モーダル（数量±） */}
+      <AddToCartSuccessModal
+        open={isSuccessOpen}
+        item={successItem}
+        initialQty={successQty}
+        onChangeQty={(q) => setSuccessQty(clampQuantity(q))}
+        onContinueScan={(q) => {
+          if (successItem) addOrIncrementProduct(successItem, clampQuantity(q), { updateManualFields: false, focusQuantityOnInsert: false });
+          setSuccessOpen(false);
+          setSuccessItem(null);
+          setSuccessQty(1);
+          setScannerOpen(true); // 続けてスキャン
+        }}
+        onFinishScan={(q) => {
+          if (successItem) addOrIncrementProduct(successItem, clampQuantity(q), { updateManualFields: false, focusQuantityOnInsert: false });
+          setSuccessOpen(false);
+          setSuccessItem(null);
+          setSuccessQty(1);
+        }}
+        onClose={() => {
+          setSuccessOpen(false);
+          setSuccessItem(null);
+        }}
+        minQty={MIN_QUANTITY}
+        maxQty={MAX_QUANTITY}
+      />
+
+      {/* 会計モーダル */}
       {isCheckoutOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
           <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-3xl bg-white p-6 shadow-xl ring-1 ring-neutral-200">
