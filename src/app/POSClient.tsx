@@ -700,7 +700,7 @@ export default function POSClient() {
         </div>
       </div>
 
-      {/* カメラ・スキャナ */}
+      {/* カメラ・/スキャナ */}
       <BarcodeScanner
         open={isScannerOpen}
         onClose={() => setScannerOpen(false)}
