@@ -50,7 +50,7 @@ export type Totals = {
 const TAX_PERCENT = 10;
 const TAX_RATE = TAX_PERCENT / 100;
 const MIN_QUANTITY = 1;
-const MAX_QUANTITY = 999;
+const MAX_QUANTITY = 99; // ★ 999→99 に変更
 const SCAN_DUPLICATE_GUARD_MS = 1200;
 
 // ===== Util =====
@@ -672,6 +672,13 @@ export default function POSClient() {
           </ul>
         </section>
       </main>
+
+      {/* ★ 固定フッターに隠れないためのスペーサー（見た目は出ません） */}
+      <div
+        aria-hidden
+        className="w-full"
+        style={{ height: 'calc(120px + env(safe-area-inset-bottom, 0px))' }}
+      />
 
       <div className="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[360px] px-4 pb-4 pt-2" data-testid="footerbar">
         <div className="rounded-[28px] bg-white p-4 shadow-xl shadow-blue-100/40 ring-1 ring-white">
