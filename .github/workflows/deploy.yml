@@ -35,6 +35,7 @@ jobs:
           echo "repo root:"; pwd; ls -la
           test -f package.json || (echo "::error ::package.json not found at repo root"; exit 1)
 
+      # ★ Node 22 でビルド（Azure 側も Node 22 を使う想定）
       - name: Setup Node (with cache)
         if: ${{ hashFiles('package-lock.json') != '' }}
         uses: actions/setup-node@v4
@@ -57,29 +58,25 @@ jobs:
           echo "=== list .next ==="; ls -la .next || true
           echo "=== list .next/standalone ==="; ls -la .next/standalone || true
           echo "=== list .next/static ==="; ls -la .next/static || true
-          echo "=== preview routes-manifest (if exists) ==="
           cat .next/routes-manifest.json 2>/dev/null || true
 
       - name: Prepare artifact (standalone runtime)
         run: |
           set -e
           rm -rf out && mkdir -p out
-          echo "=== tree .next ==="; ls -la .next || true
-          echo "=== tree .next/standalone ==="; ls -la .next/standalone || true
-          echo "=== tree .next/server ==="; ls -la .next/server || true
 
-          # 1) standalone 展開（server.js / node_modules など）
+          # 1) standalone（server.js と最小 node_modules を含む）を展開
           cp -a .next/standalone/. out/
 
-          # 2) 静的資産
+          # 2) 静的アセット
           mkdir -p out/.next
           cp -a .next/static out/.next/static
 
-          # 3) ルートのマニフェスト類
+          # 3) マニフェスト群
           cp -a .next/*.json out/.next/ 2>/dev/null || true
           cp .next/BUILD_ID out/.next/BUILD_ID
 
-          # 4) ★重要★ App Router のサーバ実体は out/server/* に配置
+          # 4) App Router 実体
           if [ -d ".next/server" ]; then
             mkdir -p out/server
             cp -a .next/server/. out/server/
@@ -88,10 +85,18 @@ jobs:
           # 5) public
           if [ -d public ]; then cp -a public out/public; fi
 
-          # 6) 実行用 package.json
-          node -e "const fs=require('fs');const pj={name:'next-standalone',version:'0.0.0',private:true,type:'commonjs',main:'server.js',engines:{node:'>=18'},scripts:{start:'node server.js'}};fs.writeFileSync('out/package.json',JSON.stringify(pj,null,2));"
+          # 6) 実行用 package.json（HOST/PORT を強制）
+          node -e "const fs=require('fs');const pj={
+            name:'next-standalone',
+            version:'0.0.0',
+            private:true,
+            type:'commonjs',
+            main:'server.js',
+            engines:{node:'>=22'},
+            scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' }
+          }; fs.writeFileSync('out/package.json', JSON.stringify(pj,null,2));"
 
-          # 7) web.config（Linuxでは無視）
+          # （Linux では無視されるが）web.config は残してOK
           cat > out/web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
@@ -126,7 +131,7 @@ jobs:
           test -d out/server/app || (echo '::error ::out/server/app missing (App Router not included)' && exit 1)
 
       - name: Sleep (avoid SCM race)
-        run: sleep 8
+        run: sleep 5
 
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
