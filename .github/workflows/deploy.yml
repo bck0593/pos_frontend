@@ -35,7 +35,7 @@ jobs:
           echo "repo root:"; pwd; ls -la
           test -f package.json || (echo "::error ::package.json not found at repo root"; exit 1)
 
-      # Node 22 固定（ビルド）
+      # Node 22 でビルド
       - name: Setup Node (with cache)
         if: ${{ hashFiles('package-lock.json') != '' }}
         uses: actions/setup-node@v4
@@ -50,43 +50,41 @@ jobs:
         with:
           node-version: "22"
 
+      # 環境変数がビルドに埋め込まれることを明示
       - name: Install & Build (Next.js standalone)
+        env:
+          NEXT_PUBLIC_BACKEND_URL: ${{ env.NEXT_PUBLIC_BACKEND_URL }}
+          NEXT_PUBLIC_API_BASE: ${{ env.NEXT_PUBLIC_API_BASE }}
+          NEXT_PUBLIC_API_BASE_URL: ${{ env.NEXT_PUBLIC_API_BASE_URL }}
         run: |
           set -e
           npm ci
-          # ※ lint はCIでは無効化
+          node -e "console.log('API_BASE=', process.env.NEXT_PUBLIC_API_BASE)"
           npm run build --no-lint
-          echo "=== list .next ==="; ls -la .next || true
-          echo "=== list .next/standalone ==="; ls -la .next/standalone || true
-          echo "=== list .next/static ==="; ls -la .next/static || true
-          cat .next/routes-manifest.json 2>/dev/null || true
+          ls -la .next || true
+          ls -la .next/standalone || true
+          ls -la .next/static || true
 
       - name: Prepare artifact (standalone runtime)
         run: |
           set -e
           rm -rf out && mkdir -p out
-
-          # 1) Next の standalone 出力を丸ごと配置（server.js / 最小 node_modules を含む）
+          # 1) standalone 展開（server.js / 最小 node_modules を含む）
           cp -a .next/standalone/. out/
-
           # 2) 静的アセット
           mkdir -p out/.next
           cp -a .next/static out/.next/static
-
-          # 3) ビルドID & マニフェスト群
+          # 3) マニフェスト群
           cp -a .next/*.json out/.next/ 2>/dev/null || true
           cp .next/BUILD_ID out/.next/BUILD_ID
-
-          # 4) App Router サーバ資産
+          # 4) App Router 実体
           if [ -d ".next/server" ]; then
             mkdir -p out/server
             cp -a .next/server/. out/server/
           fi
-
           # 5) public
           if [ -d public ]; then cp -a public out/public; fi
-
-          # 6) 実行用 package.json（Node 22 / PORT=8080 / 0.0.0.0 bind）
+          # 6) 実行用 package.json（HOST/PORT 指定）
           node -e "const fs=require('fs');const pj={
             name:'next-standalone',
             version:'0.0.0',
@@ -96,8 +94,7 @@ jobs:
             engines:{node:'>=22'},
             scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' }
           }; fs.writeFileSync('out/package.json', JSON.stringify(pj,null,2));"
-
-          # 7) （Windowsホスティング時の後方互換用）web.config
+          # （Linuxでは無視されるが）web.config は残してOK
           cat > out/web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
@@ -120,24 +117,50 @@ jobs:
             </system.webServer>
           </configuration>
           EOF
-
-          echo "=== verify out root ==="; ls -la out
-          echo "=== verify out/.next ==="; ls -la out/.next || true
-          echo "=== verify out/server ==="; ls -la out/server || true
-          echo "=== verify out/server/app ==="; ls -la out/server/app || true
-
           # 必須チェック
           test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
           test -f out/.next/BUILD_ID || (echo '::error ::BUILD_ID missing in out/.next/' && exit 1)
           test -d out/server/app || (echo '::error ::out/server/app missing (App Router not included)' && exit 1)
 
-      - name: Sleep (avoid SCM race)
-        run: sleep 5
+      # ★ OneDeploy をやめて ZIP Deploy (Kudu /zipdeploy) に切り替え
+      - name: Zip artifact
+        run: |
+          cd out
+          zip -r ../site.zip .
+          cd ..
+          ls -lh site.zip
 
-      - name: Deploy to Azure Web App
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: ./out
-          clean: true
+      - name: Deploy via Kudu ZIP Deploy (synchronous)
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          APP_NAME: ${{ env.AZURE_WEBAPP_NAME }}
+        run: |
+          set -euo pipefail
+          # publishProfile からユーザーとパスワードを抽出
+          USER=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+')
+          PASS=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+')
+          # Kudu の zipdeploy に同期アップロード
+          DEPLOY_URL="https://${APP_NAME}.scm.azurewebsites.net/api/zipdeploy?isAsync=false"
+          curl -sS -u "$USER:$PASS" \
+            -X POST "$DEPLOY_URL" \
+            -H "Content-Type: application/zip" \
+            --data-binary @site.zip
+          echo "Deployed via ZIP Deploy."
+
+      # おまけ：起動ヘルス確認（HTTP 200 になるまで最大 3 分待機）
+      - name: Warmup & health check
+        run: |
+          set -e
+          URL="https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net"
+          echo "Waiting for $URL ..."
+          for i in $(seq 1 36); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$URL")
+            echo "Try $i: $code"
+            if [ "$code" = "200" ] || [ "$code" = "304" ]; then
+              echo "App is up."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error ::App did not become healthy in time"
+          exit 1
