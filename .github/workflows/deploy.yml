@@ -35,7 +35,7 @@ jobs:
           echo "repo root:"; pwd; ls -la
           test -f package.json || (echo "::error ::package.json not found at repo root"; exit 1)
 
-      # ★ Node 22 でビルド（Azure 側も Node 22 を使う想定）
+      # Node 22 固定（ビルド）
       - name: Setup Node (with cache)
         if: ${{ hashFiles('package-lock.json') != '' }}
         uses: actions/setup-node@v4
@@ -54,6 +54,7 @@ jobs:
         run: |
           set -e
           npm ci
+          # ※ lint はCIでは無効化
           npm run build --no-lint
           echo "=== list .next ==="; ls -la .next || true
           echo "=== list .next/standalone ==="; ls -la .next/standalone || true
@@ -65,18 +66,18 @@ jobs:
           set -e
           rm -rf out && mkdir -p out
 
-          # 1) standalone（server.js と最小 node_modules を含む）を展開
+          # 1) Next の standalone 出力を丸ごと配置（server.js / 最小 node_modules を含む）
           cp -a .next/standalone/. out/
 
           # 2) 静的アセット
           mkdir -p out/.next
           cp -a .next/static out/.next/static
 
-          # 3) マニフェスト群
+          # 3) ビルドID & マニフェスト群
           cp -a .next/*.json out/.next/ 2>/dev/null || true
           cp .next/BUILD_ID out/.next/BUILD_ID
 
-          # 4) App Router 実体
+          # 4) App Router サーバ資産
           if [ -d ".next/server" ]; then
             mkdir -p out/server
             cp -a .next/server/. out/server/
@@ -85,7 +86,7 @@ jobs:
           # 5) public
           if [ -d public ]; then cp -a public out/public; fi
 
-          # 6) 実行用 package.json（HOST/PORT を強制）
+          # 6) 実行用 package.json（Node 22 / PORT=8080 / 0.0.0.0 bind）
           node -e "const fs=require('fs');const pj={
             name:'next-standalone',
             version:'0.0.0',
@@ -96,7 +97,7 @@ jobs:
             scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' }
           }; fs.writeFileSync('out/package.json', JSON.stringify(pj,null,2));"
 
-          # （Linux では無視されるが）web.config は残してOK
+          # 7) （Windowsホスティング時の後方互換用）web.config
           cat > out/web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
