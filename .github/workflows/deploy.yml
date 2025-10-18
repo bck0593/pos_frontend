@@ -50,29 +50,24 @@ jobs:
         with:
           node-version: "22"
 
-      # ✅ devDependenciesを必ず入れてpostinstallのpatch-packageを動かす
+      # devDependenciesを必ず入れる
       - name: Install deps (include dev) & verify patch-package
         env:
-          NODE_ENV: ""   # devDeps省略回避
+          NODE_ENV: ""
         run: |
           set -e
           npm config set ignore-scripts false
           npm ci --include=dev
-          npx patch-package --version || (echo "::error ::patch-package not installed"; exit 1)
+          npx patch-package --version
 
-      # ✅ 念のため、postinstallで当たらなかった場合に備えて明示的にパッチ適用
+      # 念のため明示的にpatchを適用
       - name: Apply patches explicitly
         run: |
           set -e
-          npx patch-package
-          echo "Applied patches:"
+          npx patch-package || true
           ls -la patches || true
 
-      # ✅ キャッシュを消して確実に再ビルド
-      - name: Clean build cache
-        run: rm -rf .next
-
-      # ビルド（環境変数を埋め込む）
+      # Build
       - name: Build (Next.js standalone)
         env:
           NEXT_PUBLIC_BACKEND_URL: ${{ env.NEXT_PUBLIC_BACKEND_URL }}
@@ -80,34 +75,25 @@ jobs:
           NEXT_PUBLIC_API_BASE_URL: ${{ env.NEXT_PUBLIC_API_BASE_URL }}
         run: |
           set -e
-          echo "NEXT_PUBLIC_BACKEND_URL=$NEXT_PUBLIC_BACKEND_URL"
-          echo "NEXT_PUBLIC_API_BASE=$NEXT_PUBLIC_API_BASE"
-          echo "NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL"
+          node -e "console.log('API_BASE=', process.env.NEXT_PUBLIC_API_BASE)"
           npm run build --no-lint
           ls -la .next || true
           ls -la .next/standalone || true
-          ls -la .next/static || true
 
       - name: Prepare artifact (standalone runtime)
         run: |
           set -e
           rm -rf out && mkdir -p out
-          # 1) standalone 展開（server.js / 最小 node_modules を含む）
           cp -a .next/standalone/. out/
-          # 2) 静的アセット
           mkdir -p out/.next
           cp -a .next/static out/.next/static
-          # 3) マニフェスト群
           cp -a .next/*.json out/.next/ 2>/dev/null || true
           cp .next/BUILD_ID out/.next/BUILD_ID
-          # 4) App Router 実体
           if [ -d ".next/server" ]; then
             mkdir -p out/server
             cp -a .next/server/. out/server/
           fi
-          # 5) public
           if [ -d public ]; then cp -a public out/public; fi
-          # 6) 実行用 package.json（HOST/PORT 指定）
           node -e "const fs=require('fs');const pj={
             name:'next-standalone',
             version:'0.0.0',
@@ -117,35 +103,7 @@ jobs:
             engines:{node:'>=22'},
             scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' }
           }; fs.writeFileSync('out/package.json', JSON.stringify(pj,null,2));"
-          # （Linuxでは無視されるが）web.config は残してOK
-          cat > out/web.config << 'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <configuration>
-            <system.webServer>
-              <handlers>
-                <add name="iisnode" path="server.js" verb="*" modules="iisnode" />
-              </handlers>
-              <rewrite>
-                <rules>
-                  <rule name="DynamicContent" stopProcessing="true">
-                    <match url=".*" />
-                    <action type="Rewrite" url="server.js" />
-                  </rule>
-                </rules>
-              </rewrite>
-              <staticContent>
-                <remove fileExtension=".json" />
-                <mimeMap fileExtension=".json" mimeType="application/json" />
-              </staticContent>
-            </system.webServer>
-          </configuration>
-          EOF
-          # 必須チェック
-          test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
-          test -f out/.next/BUILD_ID || (echo '::error ::BUILD_ID missing in out/.next/' && exit 1)
-          test -d out/server/app || (echo '::error ::out/server/app missing (App Router not included)' && exit 1)
 
-      # ZIP Deploy (Kudu /zipdeploy)
       - name: Zip artifact
         run: |
           cd out
@@ -159,14 +117,13 @@ jobs:
           APP_NAME: ${{ env.AZURE_WEBAPP_NAME }}
         run: |
           set -euo pipefail
-          USER=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+')
-          PASS=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+')
+          USER=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName=\"\\K[^\"]+')
+          PASS=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD=\"\\K[^\"]+')
           DEPLOY_URL="https://${APP_NAME}.scm.azurewebsites.net/api/zipdeploy?isAsync=false"
           curl -sS -u "$USER:$PASS" \
             -X POST "$DEPLOY_URL" \
             -H "Content-Type: application/zip" \
             --data-binary @site.zip
-          echo "Deployed via ZIP Deploy."
 
       - name: Warmup & health check
         run: |
