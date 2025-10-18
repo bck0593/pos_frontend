@@ -1,0 +1,16 @@
+diff --git a/node_modules/@zxing/library/esm/core/MultiFormatReader.js b/node_modules/@zxing/library/esm/core/MultiFormatReader.js
+index e53acb6..b80e6c4 100644
+--- a/node_modules/@zxing/library/esm/core/MultiFormatReader.js
++++ b/node_modules/@zxing/library/esm/core/MultiFormatReader.js
+@@ -206,7 +206,10 @@ var MultiFormatReader = /** @class */ (function () {
+             }
+             finally { if (e_2) throw e_2.error; }
+         }
+-        throw new NotFoundException('No MultiFormat Readers were able to detect the code.');
++        // CHANGED: メッセージを空にして UI に何も出ないようにする
++        // もとの実装:
++        // throw new NotFoundException('No MultiFormat Readers were able to detect the code.');
++        throw new NotFoundException('');
+     };
+     return MultiFormatReader;
+ }());
