@@ -35,7 +35,7 @@ jobs:
           echo "repo root:"; pwd; ls -la
           test -f package.json || (echo "::error ::package.json not found at repo root"; exit 1)
 
-      # Node 22 でビルド
+      # Node 22
       - name: Setup Node (with cache)
         if: ${{ hashFiles('package-lock.json') != '' }}
         uses: actions/setup-node@v4
@@ -50,15 +50,24 @@ jobs:
         with:
           node-version: "22"
 
-      # 環境変数がビルドに埋め込まれることを明示
-      - name: Install & Build (Next.js standalone)
+      # devDependencies を確実に入れて postinstall の patch-package を動かす
+      - name: Install deps (include dev) & show patch-package
+        env:
+          # ここだけ NODE_ENV を空にして devDeps 省略を回避
+          NODE_ENV: ""
+        run: |
+          set -e
+          npm ci --include=dev
+          npx patch-package --version || (echo "::error ::patch-package not installed"; exit 1)
+
+      # ビルド（環境変数を埋め込む）
+      - name: Build (Next.js standalone)
         env:
           NEXT_PUBLIC_BACKEND_URL: ${{ env.NEXT_PUBLIC_BACKEND_URL }}
           NEXT_PUBLIC_API_BASE: ${{ env.NEXT_PUBLIC_API_BASE }}
           NEXT_PUBLIC_API_BASE_URL: ${{ env.NEXT_PUBLIC_API_BASE_URL }}
         run: |
           set -e
-          npm ci
           node -e "console.log('API_BASE=', process.env.NEXT_PUBLIC_API_BASE)"
           npm run build --no-lint
           ls -la .next || true
@@ -122,7 +131,7 @@ jobs:
           test -f out/.next/BUILD_ID || (echo '::error ::BUILD_ID missing in out/.next/' && exit 1)
           test -d out/server/app || (echo '::error ::out/server/app missing (App Router not included)' && exit 1)
 
-      # ★ OneDeploy をやめて ZIP Deploy (Kudu /zipdeploy) に切り替え
+      # ZIP Deploy (Kudu /zipdeploy)
       - name: Zip artifact
         run: |
           cd out
@@ -136,10 +145,8 @@ jobs:
           APP_NAME: ${{ env.AZURE_WEBAPP_NAME }}
         run: |
           set -euo pipefail
-          # publishProfile からユーザーとパスワードを抽出
           USER=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+')
           PASS=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+')
-          # Kudu の zipdeploy に同期アップロード
           DEPLOY_URL="https://${APP_NAME}.scm.azurewebsites.net/api/zipdeploy?isAsync=false"
           curl -sS -u "$USER:$PASS" \
             -X POST "$DEPLOY_URL" \
@@ -147,7 +154,6 @@ jobs:
             --data-binary @site.zip
           echo "Deployed via ZIP Deploy."
 
-      # おまけ：起動ヘルス確認（HTTP 200 になるまで最大 3 分待機）
       - name: Warmup & health check
         run: |
           set -e
