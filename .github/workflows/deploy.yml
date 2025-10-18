@@ -16,7 +16,6 @@ jobs:
 
     env:
       AZURE_WEBAPP_NAME: app-002-gen10-step3-1-node-oshima29
-      NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
       NEXT_DISABLE_ESLINT_PLUGIN: "true"
       NEXT_PUBLIC_BACKEND_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
@@ -33,69 +32,100 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Install deps
+      # devDependencies を必ず入れて postinstall の patch-package を動かす
+      - name: Install deps (include dev)
         env:
           NODE_ENV: ""
         run: |
+          set -e
           npm config set ignore-scripts false
           npm ci --include=dev
+          npx patch-package --version
 
-      - name: Apply patches
+      # 念のため手動でもパッチ適用
+      - name: Apply patches explicitly
         run: npx patch-package || true
 
       - name: Build (Next.js standalone)
+        env:
+          NEXT_PUBLIC_BACKEND_URL: ${{ env.NEXT_PUBLIC_BACKEND_URL }}
+          NEXT_PUBLIC_API_BASE: ${{ env.NEXT_PUBLIC_API_BASE }}
+          NEXT_PUBLIC_API_BASE_URL: ${{ env.NEXT_PUBLIC_API_BASE_URL }}
         run: |
+          set -e
           npm run build --no-lint
-          ls -la .next || true
 
-      - name: Prepare artifact
+      - name: Prepare artifact (standalone)
         run: |
+          set -e
           rm -rf out && mkdir -p out
+          # 1) standalone（server.js と最小 node_modules 含む）
           cp -a .next/standalone/. out/
+          # 2) 静的
           mkdir -p out/.next
           cp -a .next/static out/.next/static
+          # 3) マニフェスト
           cp -a .next/*.json out/.next/ 2>/dev/null || true
           cp .next/BUILD_ID out/.next/BUILD_ID
+          # 4) server ディレクトリ
           if [ -d ".next/server" ]; then
             mkdir -p out/server
             cp -a .next/server/. out/server/
           fi
+          # 5) public
           if [ -d public ]; then cp -a public out/public; fi
+          # 6) 実行用 package.json
           node -e "const fs=require('fs');fs.writeFileSync('out/package.json', JSON.stringify({
             name:'next-standalone',
-            version:'0.0.0',
             private:true,
             type:'commonjs',
             main:'server.js',
-            scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' }
+            engines:{node:'>=22'},
+            scripts:{start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js'}
           },null,2));"
+          # 7) バージョン確認用
+          echo '${{ github.sha }}' > out/version.txt
 
       - name: Zip artifact
         run: |
-          cd out
-          zip -r ../site.zip .
-          cd ..
+          cd out && zip -r ../site.zip . && cd ..
+          ls -lh site.zip
 
-      - name: Deploy via Kudu ZIP Deploy
+      # ← ここが重要：Kudu 経由で wwwroot をクリーン
+      - name: Clean wwwroot via Kudu
         env:
           PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           APP_NAME: ${{ env.AZURE_WEBAPP_NAME }}
         run: |
-          sudo apt-get update && sudo apt-get install -y libxml2-utils
-          USER=$(echo "$PUBLISH_PROFILE" | xmllint --xpath "string(//publishProfile/@userName)" -)
-          PASS=$(echo "$PUBLISH_PROFILE" | xmllint --xpath "string(//publishProfile/@userPWD)" -)
-          echo "Deploying to $APP_NAME with user=$USER"
-          curl -sS -u "$USER:$PASS" \
+          set -euo pipefail
+          U=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+')
+          P=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+')
+          JSON='{"command":"rm -rf /home/site/wwwroot/* /home/site/wwwroot/.[!.]* /home/site/wwwroot/..?*","dir":"/"}'
+          curl -sS -u "$U:$P" -H "Content-Type: application/json" \
+            -X POST "https://${APP_NAME}.scm.azurewebsites.net/api/command" \
+            -d "$JSON"
+
+      - name: Deploy via Kudu ZIP Deploy (synchronous)
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          APP_NAME: ${{ env.AZURE_WEBAPP_NAME }}
+        run: |
+          set -euo pipefail
+          U=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+')
+          P=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+')
+          curl -sS -u "$U:$P" \
             -X POST "https://${APP_NAME}.scm.azurewebsites.net/api/zipdeploy?isAsync=false" \
             --data-binary @site.zip
 
-      - name: Warmup
+      - name: Warmup & verify version
         run: |
-          URL="https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net"
-          for i in {1..30}; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' "$URL")
-            echo "Try $i: $code"
-            [ "$code" = "200" ] && exit 0
-            sleep 5
+          set -e
+          URL="https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net/version.txt"
+          echo "Check: $URL"
+          for i in $(seq 1 30); do
+            echo -n "Try $i: "
+            curl -sf "$URL" && exit 0 || true
+            sleep 3
           done
+          echo "::error ::version.txt not reachable"
           exit 1
