@@ -50,24 +50,25 @@ jobs:
         with:
           node-version: "22"
 
-      # devDependenciesを必ず入れる
-      - name: Install deps (include dev) & verify patch-package
+      # devDependencies を確実に入れて postinstall の patch-package を動かす
+      - name: Install deps (include dev) & show patch-package
         env:
-          NODE_ENV: ""
+          NODE_ENV: ""   # devDeps省略回避
         run: |
           set -e
           npm config set ignore-scripts false
           npm ci --include=dev
-          npx patch-package --version
+          npx patch-package --version || (echo "::error ::patch-package not installed"; exit 1)
 
-      # 念のため明示的にpatchを適用
+      # 念のため明示的にパッチ適用
       - name: Apply patches explicitly
         run: |
           set -e
-          npx patch-package || true
+          npx patch-package
+          echo "Applied patches:"
           ls -la patches || true
 
-      # Build
+      # ビルド
       - name: Build (Next.js standalone)
         env:
           NEXT_PUBLIC_BACKEND_URL: ${{ env.NEXT_PUBLIC_BACKEND_URL }}
@@ -79,21 +80,28 @@ jobs:
           npm run build --no-lint
           ls -la .next || true
           ls -la .next/standalone || true
+          ls -la .next/static || true
 
       - name: Prepare artifact (standalone runtime)
         run: |
           set -e
           rm -rf out && mkdir -p out
+          # 1) standalone 展開
           cp -a .next/standalone/. out/
+          # 2) 静的アセット
           mkdir -p out/.next
           cp -a .next/static out/.next/static
+          # 3) マニフェスト
           cp -a .next/*.json out/.next/ 2>/dev/null || true
           cp .next/BUILD_ID out/.next/BUILD_ID
+          # 4) App Router
           if [ -d ".next/server" ]; then
             mkdir -p out/server
             cp -a .next/server/. out/server/
           fi
+          # 5) public
           if [ -d public ]; then cp -a public out/public; fi
+          # 6) 実行用 package.json
           node -e "const fs=require('fs');const pj={
             name:'next-standalone',
             version:'0.0.0',
@@ -103,7 +111,34 @@ jobs:
             engines:{node:'>=22'},
             scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' }
           }; fs.writeFileSync('out/package.json', JSON.stringify(pj,null,2));"
+          # web.config
+          cat > out/web.config << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <system.webServer>
+              <handlers>
+                <add name="iisnode" path="server.js" verb="*" modules="iisnode" />
+              </handlers>
+              <rewrite>
+                <rules>
+                  <rule name="DynamicContent" stopProcessing="true">
+                    <match url=".*" />
+                    <action type="Rewrite" url="server.js" />
+                  </rule>
+                </rules>
+              </rewrite>
+              <staticContent>
+                <remove fileExtension=".json" />
+                <mimeMap fileExtension=".json" mimeType="application/json" />
+              </staticContent>
+            </system.webServer>
+          </configuration>
+          EOF
+          test -f out/server.js || (echo '::error ::server.js missing in out/' && exit 1)
+          test -f out/.next/BUILD_ID || (echo '::error ::BUILD_ID missing in out/.next/' && exit 1)
+          test -d out/server/app || (echo '::error ::out/server/app missing (App Router not included)' && exit 1)
 
+      # ZIP Deploy
       - name: Zip artifact
         run: |
           cd out
@@ -117,13 +152,14 @@ jobs:
           APP_NAME: ${{ env.AZURE_WEBAPP_NAME }}
         run: |
           set -euo pipefail
-          USER=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName=\"\\K[^\"]+')
-          PASS=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD=\"\\K[^\"]+')
+          USER=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*userName="\([^"]*\)".*/\1/p')
+          PASS=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*userPWD="\([^"]*\)".*/\1/p')
           DEPLOY_URL="https://${APP_NAME}.scm.azurewebsites.net/api/zipdeploy?isAsync=false"
           curl -sS -u "$USER:$PASS" \
             -X POST "$DEPLOY_URL" \
             -H "Content-Type: application/zip" \
             --data-binary @site.zip
+          echo "Deployed via ZIP Deploy."
 
       - name: Warmup & health check
         run: |
