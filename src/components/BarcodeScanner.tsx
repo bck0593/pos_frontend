@@ -94,8 +94,21 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
               return;
             }
 
-            // 見つからない通常エラーは無視（NotFoundException 相当）
-            if (err && (err as any)?.name !== 'NotFoundException') {
+            // ===== ここがポイント：あの英語の文言だけ無視 =====
+            if (err) {
+              const msg = String((err as any)?.message ?? '');
+              const name = String((err as any)?.name ?? '');
+
+              // 「No MultiFormat Readers were able to detect the code」だけ握り潰す
+              if (/No MultiFormat Readers were able to detect the code/i.test(msg)) {
+                return; // 何も表示しない（ステータスも変えない）
+              }
+
+              // 通常の見つからないエラー（NotFoundException）は無視してスキャン継続
+              if (name === 'NotFoundException') {
+                return;
+              }
+
               if (DEBUG) console.warn('[ZXing] error:', err);
               setStatus('error');
               setError((err as Error).message ?? 'スキャンに失敗しました');
