@@ -33,7 +33,6 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      # devDependencies を含めてインストール
       - name: Install deps
         env:
           NODE_ENV: ""
@@ -41,7 +40,6 @@ jobs:
           npm config set ignore-scripts false
           npm ci --include=dev
 
-      # 念のため明示的にパッチを適用
       - name: Apply patches
         run: npx patch-package || true
 
@@ -83,8 +81,10 @@ jobs:
           PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           APP_NAME: ${{ env.AZURE_WEBAPP_NAME }}
         run: |
-          USER=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\\K[^"]+')
-          PASS=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\\K[^"]+')
+          sudo apt-get update && sudo apt-get install -y libxml2-utils
+          USER=$(echo "$PUBLISH_PROFILE" | xmllint --xpath "string(//publishProfile/@userName)" -)
+          PASS=$(echo "$PUBLISH_PROFILE" | xmllint --xpath "string(//publishProfile/@userPWD)" -)
+          echo "Deploying to $APP_NAME with user=$USER"
           curl -sS -u "$USER:$PASS" \
             -X POST "https://${APP_NAME}.scm.azurewebsites.net/api/zipdeploy?isAsync=false" \
             --data-binary @site.zip
