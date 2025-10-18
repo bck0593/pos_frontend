@@ -682,13 +682,20 @@ export default function POSClient() {
 
       <div className="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[360px] px-4 pb-4 pt-2" data-testid="footerbar">
         <div className="rounded-[28px] bg-white p-4 shadow-xl shadow-blue-100/40 ring-1 ring-white">
-          <div className="text-xs text-neutral-400">うち税額</div>
-          <div className="flex items-end justify-between text-xs text-neutral-500">
+          {/* うち税額（10%）を表示 */}
+          <div className="flex items-center justify-between text-xs text-neutral-500">
+            <span>うち税額（10%）</span>
+            <span>{formatCurrency(totals.tax)}</span>
+          </div>
+
+          {/* 合計（税込） */}
+          <div className="mt-1 flex items-end justify-between text-xs text-neutral-500">
             <span>合計（税込）</span>
             <span className="text-2xl font-semibold text-neutral-900">
               {formatCurrency(totals.taxIn)}
             </span>
           </div>
+
           <button
             type="button"
             onClick={() => setCheckoutOpen(true)}
