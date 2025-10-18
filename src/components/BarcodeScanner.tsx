@@ -33,7 +33,6 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
         setStatus('initializing');
         setError('');
 
-        // 🔻 サーバー側では評価されないように動的 import
         const [{ BrowserMultiFormatReader }, lib] = await Promise.all([
           import('@zxing/browser'),
           import('@zxing/library'),
@@ -94,20 +93,12 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
               return;
             }
 
-            // ===== ここがポイント：あの英語の文言だけ無視 =====
+            // 例の英語メッセージだけ完全無視
             if (err) {
               const msg = String((err as any)?.message ?? '');
               const name = String((err as any)?.name ?? '');
-
-              // 「No MultiFormat Readers were able to detect the code」だけ握り潰す
-              if (/No MultiFormat Readers were able to detect the code/i.test(msg)) {
-                return; // 何も表示しない（ステータスも変えない）
-              }
-
-              // 通常の見つからないエラー（NotFoundException）は無視してスキャン継続
-              if (name === 'NotFoundException') {
-                return;
-              }
+              if (/No MultiFormat Readers were able to detect the code/i.test(msg)) return;
+              if (name === 'NotFoundException') return;
 
               if (DEBUG) console.warn('[ZXing] error:', err);
               setStatus('error');
@@ -135,21 +126,13 @@ export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
 
   if (!open) return null;
 
-  const statusLabel =
-    status === 'initializing' ? 'カメラを準備しています…' :
-    status === 'detected'     ? '検出しました' :
-    status === 'error'        ? (error || 'スキャンに失敗しました') :
-                                'スキャン中…';
-
   return (
     <div className="fixed inset-0 z-50">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
       <div className="absolute inset-x-4 top-10 mx-auto w-full max-w-sm rounded-3xl bg-white p-4 shadow-2xl">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-base font-semibold text-gray-800">カメラで追加</h2>
-          <span className="rounded-xl bg-indigo-100 px-3 py-1 text-xs font-medium text-indigo-700">
-            {statusLabel}
-          </span>
+          {/* ← ここにあった青いメッセージ欄（ステータスバッジ）を削除 */}
         </div>
 
         <div className="relative overflow-hidden rounded-2xl border border-gray-200 bg-black">
