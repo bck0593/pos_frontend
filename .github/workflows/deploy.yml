@@ -50,15 +50,24 @@ jobs:
         with:
           node-version: "22"
 
-      # devDependencies を確実に入れて postinstall の patch-package を動かす
-      - name: Install deps (include dev) & show patch-package
+      # ✅ devDependenciesを必ず入れてpostinstallのpatch-packageを動かす
+      #   さらに ignore-scripts を明示OFF（もし環境側で無効化されてても保険）
+      - name: Install deps (include dev) & verify patch-package
         env:
-          # ここだけ NODE_ENV を空にして devDeps 省略を回避
-          NODE_ENV: ""
+          NODE_ENV: ""   # devDeps省略回避
         run: |
           set -e
+          npm config set ignore-scripts false
           npm ci --include=dev
           npx patch-package --version || (echo "::error ::patch-package not installed"; exit 1)
+
+      # ✅ 念のため、postinstallで当たらなかった場合に備えて明示的にパッチ適用
+      - name: Apply patches explicitly
+        run: |
+          set -e
+          npx patch-package
+          echo "Applied patches:"
+          ls -la patches || true
 
       # ビルド（環境変数を埋め込む）
       - name: Build (Next.js standalone)
