@@ -32,6 +32,9 @@ jobs:
           node-version: "22"
           cache: "npm"
 
+      - name: Install jq (for JSON parsing)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
       # devDependencies まで必ず入れる（postinstall / patch-package のため）
       - name: Install deps (incl. dev)
         env:
@@ -41,6 +44,15 @@ jobs:
           npm config set ignore-scripts false
           npm ci --include=dev
           npx patch-package --version || true
+
+      # version.txt を public に生成（ビルドに取り込む）
+      - name: Write build version
+        run: |
+          set -e
+          VSHORT=$(echo "${GITHUB_SHA:-unknown}" | cut -c1-8)
+          mkdir -p public
+          echo "$VSHORT" > public/version.txt
+          echo "version=$VSHORT"
 
       - name: Build (Next.js standalone)
         env:
@@ -67,7 +79,7 @@ jobs:
             mkdir -p out/server
             cp -a .next/server/. out/server/
           fi
-          # 4) public（プロジェクトの public を上書きコピー）
+          # 4) public（version.txt 含む）
           if [ -d public ]; then cp -a public out/public; fi
           # 5) 起動用 package.json
           node -e "const fs=require('fs');fs.writeFileSync('out/package.json', JSON.stringify({
@@ -82,6 +94,8 @@ jobs:
           # 6) マニフェスト
           cp -a .next/*.json out/.next/ 2>/dev/null || true
           cp .next/BUILD_ID out/.next/BUILD_ID 2>/dev/null || true
+          echo "---- out tree ----"
+          (cd out && find . -maxdepth 2 -type f | sort)
 
       - name: Zip artifact
         run: |
@@ -91,22 +105,20 @@ jobs:
           cd ..
           ls -lh site.zip
 
-      # ZIP Deploy を非同期 + 完了までポーリング
+      # Kudu ZIP Deploy（非同期）→ latest をポーリング
       - name: Deploy via Kudu ZIP Deploy (async + poll)
         env:
           PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
         run: |
           set -euo pipefail
 
-          # publishProfile から資格情報を抽出（バックスラッシュのエスケープ不要）
           USER=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+')
           PASS=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+')
           BASE="https://${APP_NAME}.scm.azurewebsites.net"
 
           echo "Uploading site.zip to Kudu (async)..."
-          R=$(curl -sS -u "$USER:$PASS" -X POST "$BASE/api/zipdeploy?isAsync=true" \
-                -H "Content-Type: application/zip" --data-binary @site.zip || true)
-          echo "zipdeploy response: $R"
+          curl -sS -u "$USER:$PASS" -X POST "$BASE/api/zipdeploy?isAsync=true" \
+            -H "Content-Type: application/zip" --data-binary @site.zip
 
           echo "Polling deployment status..."
           for i in $(seq 1 80); do
@@ -114,6 +126,7 @@ jobs:
             STATUS=$(echo "$INFO" | jq -r '.status // empty')
             TEXT=$(echo "$INFO" | jq -r '.statusText // empty')
             echo "[$i] status=${STATUS:-n/a} ${TEXT:-}"
+            # 4 = success, 3 = failed
             if [ "$STATUS" = "4" ]; then
               echo "Deployment finished (SUCCESS)."
               break
@@ -126,17 +139,32 @@ jobs:
             sleep 3
           done
 
-      # 反映確認はルート 200 のみ（version.txt チェックは外す）
-      - name: Warmup (root 200)
+      # Kudu の VFS で /site/wwwroot を直接見に行く（server.js と version.txt を確認）
+      - name: Verify files on Kudu (VFS)
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        run: |
+          set -euo pipefail
+          USER=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+')
+          PASS=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+')
+          BASE="https://${APP_NAME}.scm.azurewebsites.net"
+          echo "List wwwroot:"
+          curl -sS -u "$USER:$PASS" "$BASE/api/vfs/site/wwwroot/" | jq -r '.[].name' | sort
+          echo "Show version.txt (on Kudu):"
+          curl -sS -u "$USER:$PASS" "$BASE/api/vfs/site/wwwroot/public/version.txt" || true
+
+      # 実サイトからも version.txt を取得して一致を確認（=ブラウザのキャッシュ原因を除外）
+      - name: Warmup & check version from site
         run: |
           set -e
           URL_ROOT="https://${APP_NAME}.azurewebsites.net"
-          echo "Warming up $URL_ROOT ..."
-          for i in $(seq 1 40); do
+          URL_VER="$URL_ROOT/public/version.txt"
+          echo "Warmup $URL_ROOT ..."
+          for i in $(seq 1 60); do
             code=$(curl -s -o /dev/null -w '%{http_code}' "$URL_ROOT")
             echo "Try $i root: $code"
-            [ "$code" = "200" ] && exit 0
-            sleep 3
+            [ "$code" = "200" ] && break
+            sleep 2
           done
-          echo "::error ::App did not become healthy in time"
-          exit 1
+          echo "Site version:"
+          curl -sSf "$URL_VER" || (echo "::error ::version.txt not reachable" && exit 1)
