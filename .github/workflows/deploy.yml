@@ -1,48 +1,161 @@
-# 置き換え対象ステップ：Deploy via Kudu ZIP Deploy (async + poll)
-- name: Deploy via Kudu ZIP Deploy (async + poll)
-  env:
-    PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-  run: |
-    set -euo pipefail
+# .github/workflows/deploy.yml
+name: Deploy Frontend to Azure Web App
 
-    # 発行プロファイル(XML)から「ZipDeploy」のブロックだけを厳密に抜く
-    sudo apt-get update >/dev/null 2>&1
-    sudo apt-get install -y libxml2-utils >/dev/null 2>&1
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
 
-    ZIP_USER=$(xmllint --xpath 'string(//publishProfile[@publishMethod="ZipDeploy"]/@userName)'    <<< "$PUBLISH_PROFILE" || true)
-    ZIP_PASS=$(xmllint --xpath 'string(//publishProfile[@publishMethod="ZipDeploy"]/@userPWD)'     <<< "$PUBLISH_PROFILE" || true)
-    ZIP_URL=$(xmllint  --xpath 'string(//publishProfile[@publishMethod="ZipDeploy"]/@publishUrl)'  <<< "$PUBLISH_PROFILE" || true)
+concurrency:
+  group: deploy-frontend-azure
+  cancel-in-progress: false
 
-    if [ -z "${ZIP_USER:-}" ] || [ -z "${ZIP_PASS:-}" ] || [ -z "${ZIP_URL:-}" ]; then
-      echo "::error ::ZipDeploy profile not found in publish profile XML"
-      echo "$PUBLISH_PROFILE" | sed -n '1,30p'
-      exit 1
-    fi
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
 
-    # 例: publishUrl = app-xxxx-yyy.scm.azurewebsites.net:443
-    BASE="https://${ZIP_URL%:*}"   # 末尾の :443 を除去
-    echo "Zipdeploy endpoint: $BASE"
+    env:
+      APP_NAME: app-002-gen10-step3-1-node-oshima29
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_DISABLE_ESLINT_PLUGIN: "true"
+      NEXT_PUBLIC_BACKEND_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
+      NEXT_PUBLIC_API_BASE: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
+      NEXT_PUBLIC_API_BASE_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
 
-    echo "Uploading site.zip (async)..."
-    curl -fSs -u "$ZIP_USER:$ZIP_PASS" \
-      -X POST "$BASE/api/zipdeploy?isAsync=true" \
-      -H "Content-Type: application/zip" \
-      --data-binary @site.zip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    echo "Polling deployment status..."
-    for i in $(seq 1 80); do
-      INFO=$(curl -sS -u "$ZIP_USER:$ZIP_PASS" "$BASE/api/deployments/latest" || true)
-      STATUS=$(echo "$INFO" | jq -r '.status // empty')
-      TEXT=$(echo "$INFO" | jq -r '.statusText // empty')
-      echo "[$i] status=${STATUS:-n/a} ${TEXT:-}"
-      if [ "$STATUS" = "4" ]; then
-        echo "Deployment finished (SUCCESS)."
-        break
-      fi
-      if [ "$STATUS" = "3" ]; then
-        echo "::error ::Kudu deployment failed"
-        echo "$INFO"
-        exit 1
-      fi
-      sleep 3
-    done
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install CLI tools (jq, xmllint)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq libxml2-utils
+
+      # devDependencies も入れる（patch-package を確実に動かすため）
+      - name: Install deps (incl. dev)
+        env:
+          NODE_ENV: ""
+        run: |
+          set -e
+          npm config set ignore-scripts false
+          npm ci --include=dev
+          npx patch-package --version || true
+
+      - name: Build (Next.js standalone)
+        env:
+          NEXT_PUBLIC_BACKEND_URL: ${{ env.NEXT_PUBLIC_BACKEND_URL }}
+          NEXT_PUBLIC_API_BASE: ${{ env.NEXT_PUBLIC_API_BASE }}
+          NEXT_PUBLIC_API_BASE_URL: ${{ env.NEXT_PUBLIC_API_BASE_URL }}
+        run: |
+          set -e
+          npm run build --no-lint
+          ls -la .next || true
+          ls -la .next/standalone || true
+
+      - name: Prepare artifact
+        run: |
+          set -e
+          rm -rf out && mkdir -p out
+          # 1) Next standalone
+          cp -a .next/standalone/. out/
+          # 2) static
+          mkdir -p out/.next
+          cp -a .next/static out/.next/static
+          # 3) server (App Router)
+          if [ -d ".next/server" ]; then
+            mkdir -p out/server
+            cp -a .next/server/. out/server/
+          fi
+          # 4) public
+          if [ -d public ]; then cp -a public out/public; fi
+          # 5) version.txt（反映確認用）
+          mkdir -p out/public
+          echo "commit=$(git rev-parse --short HEAD) time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > out/public/version.txt
+          # 6) run package.json
+          node -e "const fs=require('fs');fs.writeFileSync('out/package.json', JSON.stringify({
+            name:'next-standalone',
+            version:'0.0.0',
+            private:true,
+            type:'commonjs',
+            main:'server.js',
+            scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' },
+            engines:{ node: '>=22' }
+          }, null, 2));"
+          # 7) manifests
+          cp -a .next/*.json out/.next/ 2>/dev/null || true
+          cp .next/BUILD_ID out/.next/BUILD_ID 2>/dev/null || true
+          ls -la out || true
+          ls -la out/public || true
+
+      - name: Zip artifact
+        run: |
+          set -e
+          cd out
+          zip -r ../site.zip .
+          cd ..
+          ls -lh site.zip
+
+      # 発行プロファイルの ZipDeploy 資格情報と publishUrl を厳密抽出して Kudu に投げる
+      - name: Deploy via Kudu ZIP Deploy (async + poll)
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        run: |
+          set -euo pipefail
+
+          ZIP_USER=$(xmllint --xpath 'string(//publishProfile[@publishMethod="ZipDeploy"]/@userName)'   <<< "$PUBLISH_PROFILE" || true)
+          ZIP_PASS=$(xmllint --xpath 'string(//publishProfile[@publishMethod="ZipDeploy"]/@userPWD)'    <<< "$PUBLISH_PROFILE" || true)
+          ZIP_URL=$(xmllint  --xpath 'string(//publishProfile[@publishMethod="ZipDeploy"]/@publishUrl)' <<< "$PUBLISH_PROFILE" || true)
+
+          if [ -z "${ZIP_USER:-}" ] || [ -z "${ZIP_PASS:-}" ] || [ -z "${ZIP_URL:-}" ]; then
+            echo "::error ::ZipDeploy profile not found in publish profile XML"
+            exit 1
+          fi
+
+          # 例: publishUrl = app-xxxx-yyy.scm.azurewebsites.net:443
+          BASE="https://${ZIP_URL%:*}"   # 末尾の :443 を除去
+          echo "Zipdeploy endpoint: $BASE"
+
+          echo "Uploading site.zip (async)..."
+          curl -fSs -u "$ZIP_USER:$ZIP_PASS" \
+            -X POST "$BASE/api/zipdeploy?isAsync=true" \
+            -H "Content-Type: application/zip" \
+            --data-binary @site.zip
+
+          echo "Polling deployment status..."
+          for i in $(seq 1 80); do
+            INFO=$(curl -sS -u "$ZIP_USER:$ZIP_PASS" "$BASE/api/deployments/latest" || true)
+            STATUS=$(echo "$INFO" | jq -r '.status // empty')
+            TEXT=$(echo "$INFO" | jq -r '.statusText // empty')
+            echo "[$i] status=${STATUS:-n/a} ${TEXT:-}"
+            if [ "$STATUS" = "4" ]; then
+              echo "Deployment finished (SUCCESS)."
+              break
+            fi
+            if [ "$STATUS" = "3" ]; then
+              echo "::error ::Kudu deployment failed"
+              echo "$INFO"
+              exit 1
+            fi
+            sleep 3
+          done
+
+      - name: Warmup & check version.txt
+        run: |
+          set -e
+          ROOT="https://${{ env.APP_NAME }}.azurewebsites.net"
+          VER="$ROOT/version.txt"
+          echo "Warmup $ROOT"
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$ROOT")
+            echo "Try $i root: $code"
+            [ "$code" = "200" ] && break
+            sleep 3
+          done
+          echo "Check $VER"
+          curl -fsSL "$VER" || (echo "::error ::version.txt not reachable" && exit 1)
