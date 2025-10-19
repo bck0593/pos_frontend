@@ -1,9 +1,8 @@
-# .github/workflows/deploy.yml
 name: Deploy Frontend to Azure Web App
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 concurrency:
@@ -32,8 +31,7 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      # devDependencies まで必ず入れる（postinstall / patch-package のため）
-      - name: Install deps (incl. dev)
+      - name: Install deps (include dev & enable postinstall)
         env:
           NODE_ENV: ""
         run: |
@@ -53,13 +51,13 @@ jobs:
           ls -la .next || true
           ls -la .next/standalone || true
 
-      - name: Prepare artifact
+      - name: Prepare artifact for Run-From-Package
         run: |
           set -e
           rm -rf out && mkdir -p out
-          # 1) Next standalone 一式
+          # 1) Next standalone
           cp -a .next/standalone/. out/
-          # 2) .next/static
+          # 2) static assets
           mkdir -p out/.next
           cp -a .next/static out/.next/static
           # 3) server (App Router)
@@ -67,9 +65,12 @@ jobs:
             mkdir -p out/server
             cp -a .next/server/. out/server/
           fi
-          # 4) public（プロジェクトの public を上書きコピー）
+          # 4) public
           if [ -d public ]; then cp -a public out/public; fi
-          # 5) 起動用 package.json
+          # 5) version.txt to verify after deploy
+          mkdir -p out/public
+          echo "commit=$(git rev-parse --short HEAD) time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > out/public/version.txt
+          # 6) start package.json
           node -e "const fs=require('fs');fs.writeFileSync('out/package.json', JSON.stringify({
             name:'next-standalone',
             version:'0.0.0',
@@ -79,54 +80,21 @@ jobs:
             scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' },
             engines:{ node: '>=22' }
           }, null, 2));"
-          # 6) マニフェスト
+          # 7) manifests
           cp -a .next/*.json out/.next/ 2>/dev/null || true
           cp .next/BUILD_ID out/.next/BUILD_ID 2>/dev/null || true
-
-      - name: Zip artifact
-        run: |
-          set -e
-          cd out
-          zip -r ../site.zip .
-          cd ..
+          # zip
+          (cd out && zip -r ../site.zip .)
           ls -lh site.zip
 
-      # ZIP Deploy を非同期 + 完了までポーリング
-      - name: Deploy via Kudu ZIP Deploy (async + poll)
-        env:
-          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-        run: |
-          set -euo pipefail
+      # 公式アクションで Zip Deploy（publish profile をそのまま渡す）
+      - name: Deploy to Azure WebApp (Run-From-Package)
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ env.APP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: site.zip
 
-          # publishProfile から資格情報を抽出（バックスラッシュのエスケープ不要）
-          USER=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+')
-          PASS=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+')
-          BASE="https://${APP_NAME}.scm.azurewebsites.net"
-
-          echo "Uploading site.zip to Kudu (async)..."
-          R=$(curl -sS -u "$USER:$PASS" -X POST "$BASE/api/zipdeploy?isAsync=true" \
-                -H "Content-Type: application/zip" --data-binary @site.zip || true)
-          echo "zipdeploy response: $R"
-
-          echo "Polling deployment status..."
-          for i in $(seq 1 80); do
-            INFO=$(curl -sS -u "$USER:$PASS" "$BASE/api/deployments/latest" || true)
-            STATUS=$(echo "$INFO" | jq -r '.status // empty')
-            TEXT=$(echo "$INFO" | jq -r '.statusText // empty')
-            echo "[$i] status=${STATUS:-n/a} ${TEXT:-}"
-            if [ "$STATUS" = "4" ]; then
-              echo "Deployment finished (SUCCESS)."
-              break
-            fi
-            if [ "$STATUS" = "3" ]; then
-              echo "::error ::Kudu deployment failed"
-              echo "$INFO"
-              exit 1
-            fi
-            sleep 3
-          done
-
-      # 反映確認はルート 200 のみ（version.txt チェックは外す）
       - name: Warmup (root 200)
         run: |
           set -e
