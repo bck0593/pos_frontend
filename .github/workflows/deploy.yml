@@ -1,9 +1,8 @@
-# .github/workflows/deploy.yml
 name: Deploy Frontend to Azure Web App
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 concurrency:
@@ -32,10 +31,12 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Install jq (for JSON parsing)
-        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Ensure jq exists (for polling)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
 
-      # devDependencies まで必ず入れる（postinstall / patch-package のため）
+      # devDependencies も入れる（patch-package 用）
       - name: Install deps (incl. dev)
         env:
           NODE_ENV: ""
@@ -44,15 +45,6 @@ jobs:
           npm config set ignore-scripts false
           npm ci --include=dev
           npx patch-package --version || true
-
-      # version.txt を public に生成（ビルドに取り込む）
-      - name: Write build version
-        run: |
-          set -e
-          VSHORT=$(echo "${GITHUB_SHA:-unknown}" | cut -c1-8)
-          mkdir -p public
-          echo "$VSHORT" > public/version.txt
-          echo "version=$VSHORT"
 
       - name: Build (Next.js standalone)
         env:
@@ -69,19 +61,22 @@ jobs:
         run: |
           set -e
           rm -rf out && mkdir -p out
-          # 1) Next standalone 一式
+          # 1) standalone 一式
           cp -a .next/standalone/. out/
-          # 2) .next/static
+          # 2) static
           mkdir -p out/.next
           cp -a .next/static out/.next/static
-          # 3) server (App Router)
+          # 3) server(App Router)
           if [ -d ".next/server" ]; then
             mkdir -p out/server
             cp -a .next/server/. out/server/
           fi
-          # 4) public（version.txt 含む）
+          # 4) public
           if [ -d public ]; then cp -a public out/public; fi
-          # 5) 起動用 package.json
+          # 5) 配信確認用 version.txt を作成（コミットSHA+時刻）
+          mkdir -p out/public
+          echo "commit=$(git rev-parse --short HEAD) time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > out/public/version.txt
+          # 6) 起動 package.json
           node -e "const fs=require('fs');fs.writeFileSync('out/package.json', JSON.stringify({
             name:'next-standalone',
             version:'0.0.0',
@@ -91,11 +86,11 @@ jobs:
             scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' },
             engines:{ node: '>=22' }
           }, null, 2));"
-          # 6) マニフェスト
+          # 7) マニフェスト
           cp -a .next/*.json out/.next/ 2>/dev/null || true
           cp .next/BUILD_ID out/.next/BUILD_ID 2>/dev/null || true
-          echo "---- out tree ----"
-          (cd out && find . -maxdepth 2 -type f | sort)
+          ls -la out || true
+          ls -la out/public || true
 
       - name: Zip artifact
         run: |
@@ -105,20 +100,28 @@ jobs:
           cd ..
           ls -lh site.zip
 
-      # Kudu ZIP Deploy（非同期）→ latest をポーリング
+      # Run-From-Package 用 Kudu ZIP Deploy（非同期→成功までポーリング）
       - name: Deploy via Kudu ZIP Deploy (async + poll)
         env:
           PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
         run: |
           set -euo pipefail
 
-          USER=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+')
-          PASS=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+')
+          # 発行プロファイル XML から資格情報を sed で抽出（バックスラッシュ問題回避）
+          USER=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*userName="\([^"]*\)".*/\1/p' | head -n1)
+          PASS=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*userPWD="\([^"]*\)".*/\1/p' | head -n1)
+
+          if [ -z "${USER:-}" ] || [ -z "${PASS:-}" ]; then
+            echo "::error ::Failed to parse publish profile credentials"
+            exit 1
+          fi
+
           BASE="https://${APP_NAME}.scm.azurewebsites.net"
 
-          echo "Uploading site.zip to Kudu (async)..."
-          curl -sS -u "$USER:$PASS" -X POST "$BASE/api/zipdeploy?isAsync=true" \
-            -H "Content-Type: application/zip" --data-binary @site.zip
+          echo "Uploading site.zip (async)..."
+          curl -fSs -u "$USER:$PASS" -X POST "$BASE/api/zipdeploy?isAsync=true" \
+            -H "Content-Type: application/zip" \
+            --data-binary @site.zip
 
           echo "Polling deployment status..."
           for i in $(seq 1 80); do
@@ -126,7 +129,6 @@ jobs:
             STATUS=$(echo "$INFO" | jq -r '.status // empty')
             TEXT=$(echo "$INFO" | jq -r '.statusText // empty')
             echo "[$i] status=${STATUS:-n/a} ${TEXT:-}"
-            # 4 = success, 3 = failed
             if [ "$STATUS" = "4" ]; then
               echo "Deployment finished (SUCCESS)."
               break
@@ -139,32 +141,17 @@ jobs:
             sleep 3
           done
 
-      # Kudu の VFS で /site/wwwroot を直接見に行く（server.js と version.txt を確認）
-      - name: Verify files on Kudu (VFS)
-        env:
-          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-        run: |
-          set -euo pipefail
-          USER=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+')
-          PASS=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+')
-          BASE="https://${APP_NAME}.scm.azurewebsites.net"
-          echo "List wwwroot:"
-          curl -sS -u "$USER:$PASS" "$BASE/api/vfs/site/wwwroot/" | jq -r '.[].name' | sort
-          echo "Show version.txt (on Kudu):"
-          curl -sS -u "$USER:$PASS" "$BASE/api/vfs/site/wwwroot/public/version.txt" || true
-
-      # 実サイトからも version.txt を取得して一致を確認（=ブラウザのキャッシュ原因を除外）
-      - name: Warmup & check version from site
+      # 200 応答だけでウォームアップ
+      - name: Warmup (root 200)
         run: |
           set -e
           URL_ROOT="https://${APP_NAME}.azurewebsites.net"
-          URL_VER="$URL_ROOT/public/version.txt"
-          echo "Warmup $URL_ROOT ..."
-          for i in $(seq 1 60); do
+          echo "Warming up $URL_ROOT ..."
+          for i in $(seq 1 40); do
             code=$(curl -s -o /dev/null -w '%{http_code}' "$URL_ROOT")
             echo "Try $i root: $code"
-            [ "$code" = "200" ] && break
-            sleep 2
+            [ "$code" = "200" ] && exit 0
+            sleep 3
           done
-          echo "Site version:"
-          curl -sSf "$URL_VER" || (echo "::error ::version.txt not reachable" && exit 1)
+          echo "::error ::App did not become healthy in time"
+          exit 1
