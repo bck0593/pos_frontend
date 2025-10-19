@@ -31,7 +31,7 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Install deps (include dev & enable postinstall)
+      - name: Install deps (include dev)
         env:
           NODE_ENV: ""
         run: |
@@ -55,39 +55,21 @@ jobs:
         run: |
           set -e
           rm -rf out && mkdir -p out
-          # 1) Next standalone
           cp -a .next/standalone/. out/
-          # 2) static assets
-          mkdir -p out/.next
-          cp -a .next/static out/.next/static
-          # 3) server (App Router)
-          if [ -d ".next/server" ]; then
-            mkdir -p out/server
-            cp -a .next/server/. out/server/
-          fi
-          # 4) public
-          if [ -d public ]; then cp -a public out/public; fi
-          # 5) version.txt to verify after deploy
+          mkdir -p out/.next && cp -a .next/static out/.next/static
+          if [ -d ".next/server" ]; then mkdir -p out/server && cp -a .next/server/. out/server/; fi
+          [ -d public ] && cp -a public out/public
           mkdir -p out/public
           echo "commit=$(git rev-parse --short HEAD) time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > out/public/version.txt
-          # 6) start package.json
           node -e "const fs=require('fs');fs.writeFileSync('out/package.json', JSON.stringify({
-            name:'next-standalone',
-            version:'0.0.0',
-            private:true,
-            type:'commonjs',
-            main:'server.js',
-            scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' },
-            engines:{ node: '>=22' }
+            name:'next-standalone', version:'0.0.0', private:true, type:'commonjs', main:'server.js',
+            scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' }, engines:{ node: '>=22' }
           }, null, 2));"
-          # 7) manifests
           cp -a .next/*.json out/.next/ 2>/dev/null || true
           cp .next/BUILD_ID out/.next/BUILD_ID 2>/dev/null || true
-          # zip
           (cd out && zip -r ../site.zip .)
           ls -lh site.zip
 
-      # 公式アクションで Zip Deploy（publish profile をそのまま渡す）
       - name: Deploy to Azure WebApp (Run-From-Package)
         uses: azure/webapps-deploy@v2
         with:
