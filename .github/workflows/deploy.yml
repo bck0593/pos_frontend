@@ -1,3 +1,4 @@
+# .github/workflows/deploy.yml
 name: Deploy Frontend to Azure Web App
 
 on:
@@ -107,7 +108,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 発行プロファイル XML から資格情報を sed で抽出（バックスラッシュ問題回避）
+          # 発行プロファイルから資格情報を抽出（バックスラッシュ問題回避）
           USER=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*userName="\([^"]*\)".*/\1/p' | head -n1)
           PASS=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*userPWD="\([^"]*\)".*/\1/p' | head -n1)
 
@@ -140,6 +141,25 @@ jobs:
             fi
             sleep 3
           done
+
+      # ← ここを追加：Kudu 側のアクティブ ZIP & version.txt を検証
+      - name: Verify Kudu packagename & version.txt
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        run: |
+          set -euo pipefail
+          USER=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*userName="\([^"]*\)".*/\1/p' | head -n1)
+          PASS=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*userPWD="\([^"]*\)".*/\1/p' | head -n1)
+          BASE="https://${APP_NAME}.scm.azurewebsites.net"
+
+          echo "Active package name:"
+          curl -fsS -u "$USER:$PASS" "$BASE/api/vfs/data/SitePackages/packagename.txt" || echo "no packagename.txt"
+
+          echo "version.txt from wwwroot (after swap):"
+          curl -fsS -u "$USER:$PASS" "$BASE/api/vfs/site/wwwroot/public/version.txt" || echo "missing wwwroot version.txt"
+
+          echo "version.txt over public URL:"
+          curl -fsS "https://${APP_NAME}.azurewebsites.net/version.txt" || echo "public URL missing version.txt"
 
       # 200 応答だけでウォームアップ
       - name: Warmup (root 200)
