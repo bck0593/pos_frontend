@@ -32,12 +32,12 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Install CLI tools (jq, xmllint)
+      - name: Install jq (for polling)
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libxml2-utils
+          sudo apt-get install -y jq
 
-      # devDependencies も入れる（patch-package を確実に動かすため）
+      # devDependencies も入れる（patch-package を確実に動かす）
       - name: Install deps (incl. dev)
         env:
           NODE_ENV: ""
@@ -101,35 +101,33 @@ jobs:
           cd ..
           ls -lh site.zip
 
-      # 発行プロファイルの ZipDeploy 資格情報と publishUrl を厳密抽出して Kudu に投げる
+      # 発行プロファイル XML から最初に見つかった publishProfile の userName/userPWD を抽出して Kudu に投げる
       - name: Deploy via Kudu ZIP Deploy (async + poll)
         env:
           PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
         run: |
           set -euo pipefail
 
-          ZIP_USER=$(xmllint --xpath 'string(//publishProfile[@publishMethod="ZipDeploy"]/@userName)'   <<< "$PUBLISH_PROFILE" || true)
-          ZIP_PASS=$(xmllint --xpath 'string(//publishProfile[@publishMethod="ZipDeploy"]/@userPWD)'    <<< "$PUBLISH_PROFILE" || true)
-          ZIP_URL=$(xmllint  --xpath 'string(//publishProfile[@publishMethod="ZipDeploy"]/@publishUrl)' <<< "$PUBLISH_PROFILE" || true)
+          # どの publishMethod でもOK（MSDeploy/ZipDeploy/FTP 等）から最初の userName/userPWD を抜く
+          USER=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*publishProfile[^>]*userName="\([^"]*\)".*/\1/p' | head -n1)
+          PASS=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*publishProfile[^>]*userPWD="\([^"]*\)".*/\1/p' | head -n1)
 
-          if [ -z "${ZIP_USER:-}" ] || [ -z "${ZIP_PASS:-}" ] || [ -z "${ZIP_URL:-}" ]; then
-            echo "::error ::ZipDeploy profile not found in publish profile XML"
+          if [ -z "${USER:-}" ] || [ -z "${PASS:-}" ]; then
+            echo "::error ::Failed to parse publish profile credentials"
             exit 1
           fi
 
-          # 例: publishUrl = app-xxxx-yyy.scm.azurewebsites.net:443
-          BASE="https://${ZIP_URL%:*}"   # 末尾の :443 を除去
-          echo "Zipdeploy endpoint: $BASE"
+          BASE="https://${APP_NAME}.scm.azurewebsites.net"
 
-          echo "Uploading site.zip (async)..."
-          curl -fSs -u "$ZIP_USER:$ZIP_PASS" \
+          echo "Uploading site.zip (async) to $BASE ..."
+          curl -fSs -u "$USER:$PASS" \
             -X POST "$BASE/api/zipdeploy?isAsync=true" \
             -H "Content-Type: application/zip" \
             --data-binary @site.zip
 
           echo "Polling deployment status..."
           for i in $(seq 1 80); do
-            INFO=$(curl -sS -u "$ZIP_USER:$ZIP_PASS" "$BASE/api/deployments/latest" || true)
+            INFO=$(curl -sS -u "$USER:$PASS" "$BASE/api/deployments/latest" || true)
             STATUS=$(echo "$INFO" | jq -r '.status // empty')
             TEXT=$(echo "$INFO" | jq -r '.statusText // empty')
             echo "[$i] status=${STATUS:-n/a} ${TEXT:-}"
