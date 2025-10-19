@@ -1,177 +1,48 @@
-# .github/workflows/deploy.yml
-name: Deploy Frontend to Azure Web App
+# 置き換え対象ステップ：Deploy via Kudu ZIP Deploy (async + poll)
+- name: Deploy via Kudu ZIP Deploy (async + poll)
+  env:
+    PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+  run: |
+    set -euo pipefail
 
-on:
-  push:
-    branches: ["main"]
-  workflow_dispatch:
+    # 発行プロファイル(XML)から「ZipDeploy」のブロックだけを厳密に抜く
+    sudo apt-get update >/dev/null 2>&1
+    sudo apt-get install -y libxml2-utils >/dev/null 2>&1
 
-concurrency:
-  group: deploy-frontend-azure
-  cancel-in-progress: false
+    ZIP_USER=$(xmllint --xpath 'string(//publishProfile[@publishMethod="ZipDeploy"]/@userName)'    <<< "$PUBLISH_PROFILE" || true)
+    ZIP_PASS=$(xmllint --xpath 'string(//publishProfile[@publishMethod="ZipDeploy"]/@userPWD)'     <<< "$PUBLISH_PROFILE" || true)
+    ZIP_URL=$(xmllint  --xpath 'string(//publishProfile[@publishMethod="ZipDeploy"]/@publishUrl)'  <<< "$PUBLISH_PROFILE" || true)
 
-jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest
+    if [ -z "${ZIP_USER:-}" ] || [ -z "${ZIP_PASS:-}" ] || [ -z "${ZIP_URL:-}" ]; then
+      echo "::error ::ZipDeploy profile not found in publish profile XML"
+      echo "$PUBLISH_PROFILE" | sed -n '1,30p'
+      exit 1
+    fi
 
-    env:
-      APP_NAME: app-002-gen10-step3-1-node-oshima29
-      NEXT_TELEMETRY_DISABLED: "1"
-      NEXT_DISABLE_ESLINT_PLUGIN: "true"
-      NEXT_PUBLIC_BACKEND_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
-      NEXT_PUBLIC_API_BASE: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
-      NEXT_PUBLIC_API_BASE_URL: https://app-002-gen10-step3-1-py-oshima29.azurewebsites.net
+    # 例: publishUrl = app-xxxx-yyy.scm.azurewebsites.net:443
+    BASE="https://${ZIP_URL%:*}"   # 末尾の :443 を除去
+    echo "Zipdeploy endpoint: $BASE"
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    echo "Uploading site.zip (async)..."
+    curl -fSs -u "$ZIP_USER:$ZIP_PASS" \
+      -X POST "$BASE/api/zipdeploy?isAsync=true" \
+      -H "Content-Type: application/zip" \
+      --data-binary @site.zip
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Ensure jq exists (for polling)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-
-      # devDependencies も入れる（patch-package 用）
-      - name: Install deps (incl. dev)
-        env:
-          NODE_ENV: ""
-        run: |
-          set -e
-          npm config set ignore-scripts false
-          npm ci --include=dev
-          npx patch-package --version || true
-
-      - name: Build (Next.js standalone)
-        env:
-          NEXT_PUBLIC_BACKEND_URL: ${{ env.NEXT_PUBLIC_BACKEND_URL }}
-          NEXT_PUBLIC_API_BASE: ${{ env.NEXT_PUBLIC_API_BASE }}
-          NEXT_PUBLIC_API_BASE_URL: ${{ env.NEXT_PUBLIC_API_BASE_URL }}
-        run: |
-          set -e
-          npm run build --no-lint
-          ls -la .next || true
-          ls -la .next/standalone || true
-
-      - name: Prepare artifact
-        run: |
-          set -e
-          rm -rf out && mkdir -p out
-          # 1) standalone 一式
-          cp -a .next/standalone/. out/
-          # 2) static
-          mkdir -p out/.next
-          cp -a .next/static out/.next/static
-          # 3) server(App Router)
-          if [ -d ".next/server" ]; then
-            mkdir -p out/server
-            cp -a .next/server/. out/server/
-          fi
-          # 4) public
-          if [ -d public ]; then cp -a public out/public; fi
-          # 5) 配信確認用 version.txt を作成（コミットSHA+時刻）
-          mkdir -p out/public
-          echo "commit=$(git rev-parse --short HEAD) time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > out/public/version.txt
-          # 6) 起動 package.json
-          node -e "const fs=require('fs');fs.writeFileSync('out/package.json', JSON.stringify({
-            name:'next-standalone',
-            version:'0.0.0',
-            private:true,
-            type:'commonjs',
-            main:'server.js',
-            scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' },
-            engines:{ node: '>=22' }
-          }, null, 2));"
-          # 7) マニフェスト
-          cp -a .next/*.json out/.next/ 2>/dev/null || true
-          cp .next/BUILD_ID out/.next/BUILD_ID 2>/dev/null || true
-          ls -la out || true
-          ls -la out/public || true
-
-      - name: Zip artifact
-        run: |
-          set -e
-          cd out
-          zip -r ../site.zip .
-          cd ..
-          ls -lh site.zip
-
-      # Run-From-Package 用 Kudu ZIP Deploy（非同期→成功までポーリング）
-      - name: Deploy via Kudu ZIP Deploy (async + poll)
-        env:
-          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-        run: |
-          set -euo pipefail
-
-          # 発行プロファイルから資格情報を抽出（バックスラッシュ問題回避）
-          USER=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*userName="\([^"]*\)".*/\1/p' | head -n1)
-          PASS=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*userPWD="\([^"]*\)".*/\1/p' | head -n1)
-
-          if [ -z "${USER:-}" ] || [ -z "${PASS:-}" ]; then
-            echo "::error ::Failed to parse publish profile credentials"
-            exit 1
-          fi
-
-          BASE="https://${APP_NAME}.scm.azurewebsites.net"
-
-          echo "Uploading site.zip (async)..."
-          curl -fSs -u "$USER:$PASS" -X POST "$BASE/api/zipdeploy?isAsync=true" \
-            -H "Content-Type: application/zip" \
-            --data-binary @site.zip
-
-          echo "Polling deployment status..."
-          for i in $(seq 1 80); do
-            INFO=$(curl -sS -u "$USER:$PASS" "$BASE/api/deployments/latest" || true)
-            STATUS=$(echo "$INFO" | jq -r '.status // empty')
-            TEXT=$(echo "$INFO" | jq -r '.statusText // empty')
-            echo "[$i] status=${STATUS:-n/a} ${TEXT:-}"
-            if [ "$STATUS" = "4" ]; then
-              echo "Deployment finished (SUCCESS)."
-              break
-            fi
-            if [ "$STATUS" = "3" ]; then
-              echo "::error ::Kudu deployment failed"
-              echo "$INFO"
-              exit 1
-            fi
-            sleep 3
-          done
-
-      # ← ここを追加：Kudu 側のアクティブ ZIP & version.txt を検証
-      - name: Verify Kudu packagename & version.txt
-        env:
-          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-        run: |
-          set -euo pipefail
-          USER=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*userName="\([^"]*\)".*/\1/p' | head -n1)
-          PASS=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*userPWD="\([^"]*\)".*/\1/p' | head -n1)
-          BASE="https://${APP_NAME}.scm.azurewebsites.net"
-
-          echo "Active package name:"
-          curl -fsS -u "$USER:$PASS" "$BASE/api/vfs/data/SitePackages/packagename.txt" || echo "no packagename.txt"
-
-          echo "version.txt from wwwroot (after swap):"
-          curl -fsS -u "$USER:$PASS" "$BASE/api/vfs/site/wwwroot/public/version.txt" || echo "missing wwwroot version.txt"
-
-          echo "version.txt over public URL:"
-          curl -fsS "https://${APP_NAME}.azurewebsites.net/version.txt" || echo "public URL missing version.txt"
-
-      # 200 応答だけでウォームアップ
-      - name: Warmup (root 200)
-        run: |
-          set -e
-          URL_ROOT="https://${APP_NAME}.azurewebsites.net"
-          echo "Warming up $URL_ROOT ..."
-          for i in $(seq 1 40); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' "$URL_ROOT")
-            echo "Try $i root: $code"
-            [ "$code" = "200" ] && exit 0
-            sleep 3
-          done
-          echo "::error ::App did not become healthy in time"
-          exit 1
+    echo "Polling deployment status..."
+    for i in $(seq 1 80); do
+      INFO=$(curl -sS -u "$ZIP_USER:$ZIP_PASS" "$BASE/api/deployments/latest" || true)
+      STATUS=$(echo "$INFO" | jq -r '.status // empty')
+      TEXT=$(echo "$INFO" | jq -r '.statusText // empty')
+      echo "[$i] status=${STATUS:-n/a} ${TEXT:-}"
+      if [ "$STATUS" = "4" ]; then
+        echo "Deployment finished (SUCCESS)."
+        break
+      fi
+      if [ "$STATUS" = "3" ]; then
+        echo "::error ::Kudu deployment failed"
+        echo "$INFO"
+        exit 1
+      fi
+      sleep 3
+    done
