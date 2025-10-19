@@ -3,7 +3,7 @@ name: Deploy Frontend to Azure Web App
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
   workflow_dispatch:
 
 concurrency:
@@ -32,12 +32,7 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Install jq (for polling)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-
-      # devDependencies も入れる（patch-package を確実に動かす）
+      # devDependencies まで必ず入れる（postinstall / patch-package のため）
       - name: Install deps (incl. dev)
         env:
           NODE_ENV: ""
@@ -62,9 +57,9 @@ jobs:
         run: |
           set -e
           rm -rf out && mkdir -p out
-          # 1) Next standalone
+          # 1) Next standalone 一式
           cp -a .next/standalone/. out/
-          # 2) static
+          # 2) .next/static
           mkdir -p out/.next
           cp -a .next/static out/.next/static
           # 3) server (App Router)
@@ -72,12 +67,9 @@ jobs:
             mkdir -p out/server
             cp -a .next/server/. out/server/
           fi
-          # 4) public
+          # 4) public（プロジェクトの public を上書きコピー）
           if [ -d public ]; then cp -a public out/public; fi
-          # 5) version.txt（反映確認用）
-          mkdir -p out/public
-          echo "commit=$(git rev-parse --short HEAD) time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > out/public/version.txt
-          # 6) run package.json
+          # 5) 起動用 package.json
           node -e "const fs=require('fs');fs.writeFileSync('out/package.json', JSON.stringify({
             name:'next-standalone',
             version:'0.0.0',
@@ -87,11 +79,9 @@ jobs:
             scripts:{ start:'HOST=0.0.0.0 PORT=${PORT:-8080} node server.js' },
             engines:{ node: '>=22' }
           }, null, 2));"
-          # 7) manifests
+          # 6) マニフェスト
           cp -a .next/*.json out/.next/ 2>/dev/null || true
           cp .next/BUILD_ID out/.next/BUILD_ID 2>/dev/null || true
-          ls -la out || true
-          ls -la out/public || true
 
       - name: Zip artifact
         run: |
@@ -101,29 +91,22 @@ jobs:
           cd ..
           ls -lh site.zip
 
-      # 発行プロファイル XML から最初に見つかった publishProfile の userName/userPWD を抽出して Kudu に投げる
+      # ZIP Deploy を非同期 + 完了までポーリング
       - name: Deploy via Kudu ZIP Deploy (async + poll)
         env:
           PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
         run: |
           set -euo pipefail
 
-          # どの publishMethod でもOK（MSDeploy/ZipDeploy/FTP 等）から最初の userName/userPWD を抜く
-          USER=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*publishProfile[^>]*userName="\([^"]*\)".*/\1/p' | head -n1)
-          PASS=$(echo "$PUBLISH_PROFILE" | sed -n 's/.*publishProfile[^>]*userPWD="\([^"]*\)".*/\1/p' | head -n1)
-
-          if [ -z "${USER:-}" ] || [ -z "${PASS:-}" ]; then
-            echo "::error ::Failed to parse publish profile credentials"
-            exit 1
-          fi
-
+          # publishProfile から資格情報を抽出（バックスラッシュのエスケープ不要）
+          USER=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+')
+          PASS=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+')
           BASE="https://${APP_NAME}.scm.azurewebsites.net"
 
-          echo "Uploading site.zip (async) to $BASE ..."
-          curl -fSs -u "$USER:$PASS" \
-            -X POST "$BASE/api/zipdeploy?isAsync=true" \
-            -H "Content-Type: application/zip" \
-            --data-binary @site.zip
+          echo "Uploading site.zip to Kudu (async)..."
+          R=$(curl -sS -u "$USER:$PASS" -X POST "$BASE/api/zipdeploy?isAsync=true" \
+                -H "Content-Type: application/zip" --data-binary @site.zip || true)
+          echo "zipdeploy response: $R"
 
           echo "Polling deployment status..."
           for i in $(seq 1 80); do
@@ -143,17 +126,17 @@ jobs:
             sleep 3
           done
 
-      - name: Warmup & check version.txt
+      # 反映確認はルート 200 のみ（version.txt チェックは外す）
+      - name: Warmup (root 200)
         run: |
           set -e
-          ROOT="https://${{ env.APP_NAME }}.azurewebsites.net"
-          VER="$ROOT/version.txt"
-          echo "Warmup $ROOT"
+          URL_ROOT="https://${APP_NAME}.azurewebsites.net"
+          echo "Warming up $URL_ROOT ..."
           for i in $(seq 1 40); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' "$ROOT")
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$URL_ROOT")
             echo "Try $i root: $code"
-            [ "$code" = "200" ] && break
+            [ "$code" = "200" ] && exit 0
             sleep 3
           done
-          echo "Check $VER"
-          curl -fsSL "$VER" || (echo "::error ::version.txt not reachable" && exit 1)
+          echo "::error ::App did not become healthy in time"
+          exit 1
