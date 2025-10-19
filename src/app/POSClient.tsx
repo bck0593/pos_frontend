@@ -9,6 +9,9 @@ const BarcodeScanner = dynamic(() => import('../components/BarcodeScanner'), { s
 // ✅ 追加：スキャン成功モーダル（数量±付き）
 import AddToCartSuccessModal from '@/components/AddToCartSuccessModal';
 
+// ✅ [Stripe] 追加：Hosted Checkout 起動ヘルパ
+import { startStripeCheckout } from '@/lib/pay';
+
 import {
   fetchProductByCode,
   submitPurchase,
@@ -351,6 +354,33 @@ export default function POSClient() {
     }
   }, [cart, pushError, resetManualFields, showToast]);
 
+  // ✅ [Stripe] 追加：Stripe会計（Hosted Checkout → WebhookでDB登録）
+  const handleStripeCheckout = useCallback(async () => {
+    if (cart.length === 0) {
+      pushError('カートが空です。');
+      return;
+    }
+    setIsConfirming(true);
+    setToastMessage('');
+    try {
+      await startStripeCheckout(
+        cart.map((c) => ({
+          code: c.code,
+          name: c.name,
+          unitPrice: c.unitPrice,
+          quantity: c.quantity,
+        })),
+      );
+      // Hosted Checkout にリダイレクトされる想定。戻ってくるのは /success or /cancel
+    } catch (e: any) {
+      pushError(e?.message ?? 'Stripeの起動に失敗しました。', {
+        label: 'もう一度',
+        handler: () => void handleStripeCheckout(),
+      });
+      setIsConfirming(false);
+    }
+  }, [cart, pushError]);
+
   // ===== スキャン処理 =====
   const openSuccessModal = useCallback((item: ItemMaster) => {
     setSuccessItem(item);
@@ -548,7 +578,7 @@ export default function POSClient() {
                 if (sanitized.length < 13) setPendingProduct(null);
               }}
               placeholder="バーコード入力 / スキャン番号"
-              className="w-full rounded-2xl border border-[#e3e8ff] bg-white px-4 py-3 text-sm text-neutral-800 shadow-inner shadow-blue-100/30 placeholder:text-neutral-400"
+              className="w-full rounded-2xl border border-[#e3e8ff] bg白 px-4 py-3 text-sm text-neutral-800 shadow-inner shadow-blue-100/30 placeholder:text-neutral-400"
             />
             <input
               value={pendingProduct?.name ?? ''}
@@ -786,6 +816,17 @@ export default function POSClient() {
               >
                 戻る
               </button>
+
+              {/* ✅ [Stripe] 追加ボタン：Stripeで支払う（Checkout） */}
+              <button
+                type="button"
+                onClick={() => void handleStripeCheckout()}
+                disabled={isConfirming || cart.length === 0}
+                className="min-h-[48px] flex-1 rounded-2xl border border-neutral-300 bg-white text-sm font-semibold hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Stripeで支払う（TEST）
+              </button>
+
               <button
                 type="button"
                 onClick={() => void handleConfirmCheckout()}
